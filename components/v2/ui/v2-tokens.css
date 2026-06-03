@@ -1,0 +1,157 @@
+/* ──────────────────────────────────────────────────────────────────────────
+   FLIGHTDECK token contract — Claude Hub /v2 design system (Contract v1.0)
+   ──────────────────────────────────────────────────────────────────────────
+   DARK is the default theme (:root). LIGHT ("Day Deck") applies via .light.
+   Every /v2 primitive reads only these `--v2-*` variables; no component
+   hard-codes a hex. Import this once from the /v2 layout:
+       import '@/components/v2/ui/v2-tokens.css'
+   This file is owned by the primitive-kit agent and is safe to import
+   anywhere under app/v2/** or components/v2/**.
+   ────────────────────────────────────────────────────────────────────────── */
+
+:root {
+  /* Background layers (page → channel → recessed) */
+  --v2-bg:           #0A0C10;
+  --v2-bg-2:         #0D1016;
+
+  /* Surfaces / cards (raised above bg) */
+  --v2-surface:      #11141B;
+  --v2-surface-2:    #161A23;
+  --v2-surface-3:    #1C212C;
+
+  /* Borders (hairlines) */
+  --v2-border:       #232834;
+  --v2-border-2:     #2E3543;
+
+  /* Text */
+  --v2-text:         #E6E9EF;
+  --v2-muted:        #8A93A3;
+  --v2-faint:        #5C6573;
+
+  /* Primary accent (desaturated terracotta — selection / active mode) */
+  --v2-accent:       #E08A4C;
+  --v2-accent-weak:  #E08A4C26;
+  --v2-accent-fg:    #0A0C10;
+
+  /* Semantic — reserved, meaning-bearing only */
+  --v2-live:         #3BD17A;
+  --v2-live-weak:    #3BD17A24;
+  --v2-recent:       #F2B544;
+  --v2-cost:         #F2645A;
+  --v2-token:        #4FA3F7;
+
+  /* Extended semantics */
+  --v2-token-weak:   #4FA3F726;
+  --v2-cost-weak:    #F2645A26;
+  --v2-ai:           #9B8CFF;
+  --v2-error:        #F2645A;
+  --v2-success:      #3BD17A;
+
+  /* Sparkline burn-rate gradient stops (token → cost) */
+  --v2-spark-from:   #4FA3F7;
+  --v2-spark-to:     #E08A4C;
+
+  /* Search match highlight */
+  --v2-match-bg:     #2A2F1A;
+  --v2-match-fg:     #E8E06B;
+
+  /* Geometry / motion — tighter radii read crisper at high density */
+  --v2-radius:       5px;
+  --v2-radius-sm:    4px;
+  --v2-radius-lg:    8px;
+  --v2-radius-pill:  999px;
+  --v2-rail-h:       36px;
+  --v2-status-h:     24px;
+  --v2-gutter-w:     56px;
+  --v2-gutter-w-exp: 200px;
+  --v2-ease:         cubic-bezier(0.2, 0.8, 0.2, 1);
+  --v2-dur:          140ms;
+
+  /* Spacing rhythm — 4px base grid, tightened for density.
+     Small steps keep the grid; large steps are compressed so section gaps
+     and page gutters waste less space on wide displays. */
+  --v2-s1: 4px;
+  --v2-s2: 6px;
+  --v2-s3: 10px;
+  --v2-s4: 14px;
+  --v2-s5: 18px;
+  --v2-s6: 24px;
+  --v2-s8: 32px;
+
+  /* Type families */
+  --v2-font-sans: ui-sans-serif, system-ui, -apple-system, "Segoe UI", Inter, sans-serif;
+  --v2-font-mono: var(--font-geist-mono), "JetBrains Mono", monospace;
+
+  /* Type scale (px) */
+  --v2-text-label:   11px;
+  --v2-text-micro:   12px;
+  --v2-text-body:    13px;
+  --v2-text-sm-head: 15px;
+  --v2-text-hero:    22px;
+  --v2-text-hero-lg: 30px;
+}
+
+/* ──────────────────────────────────────────────────────────────────────────
+   LIGHT theme — "Day Deck". Apply via .light on <html>.
+   Ship dark as the unconditional default; the legacy toggle uses .dark, so
+   /v2 layers .light on top of its own scoped dark default.
+   ────────────────────────────────────────────────────────────────────────── */
+.light {
+  --v2-bg:           #F2F3F5;
+  --v2-bg-2:         #EBEDF0;
+  --v2-surface:      #FFFFFF;
+  --v2-surface-2:    #FAFAFB;
+  --v2-surface-3:    #FFFFFF;
+  --v2-border:       #D6DAE0;
+  --v2-border-2:     #C2C8D1;
+  --v2-text:         #12151B;
+  --v2-muted:        #5A626E;
+  --v2-faint:        #8A93A3;
+  --v2-accent:       #C26A2E;
+  --v2-accent-weak:  #C26A2E1F;
+  --v2-accent-fg:    #FFFFFF;
+  --v2-live:         #128A4B;
+  --v2-live-weak:    #128A4B1A;
+  --v2-recent:       #B9791A;
+  --v2-cost:         #D23B30;
+  --v2-token:        #1F6FD4;
+  --v2-token-weak:   #1F6FD41A;
+  --v2-cost-weak:    #D23B301A;
+  --v2-ai:           #5B4BD6;
+  --v2-error:        #D23B30;
+  --v2-success:      #128A4B;
+  --v2-spark-from:   #1F6FD4;
+  --v2-spark-to:     #C26A2E;
+  --v2-match-bg:     #FFF3B0;
+  --v2-match-fg:     #5A4B00;
+}
+
+/* ──────────────────────────────────────────────────────────────────────────
+   Shared keyframes + helper utility classes for the primitive kit.
+   Scoped with `v2-` prefixes so they never collide with the legacy app.
+   ────────────────────────────────────────────────────────────────────────── */
+
+/* Live heartbeat — a 2s expanding ring, used by StatusDot/Pill `live`. */
+@keyframes v2-pulse-ring {
+  0%   { transform: scale(1);   opacity: 0.55; }
+  70%  { transform: scale(2.4); opacity: 0;    }
+  100% { transform: scale(2.4); opacity: 0;    }
+}
+
+/* Calm skeleton shimmer — replaces all spinners (1.2s opacity breathe). */
+@keyframes v2-shimmer {
+  0%, 100% { opacity: 0.45; }
+  50%      { opacity: 0.85; }
+}
+
+.v2-anim-pulse-ring {
+  animation: v2-pulse-ring 2s var(--v2-ease) infinite;
+}
+.v2-anim-shimmer {
+  animation: v2-shimmer 1.2s ease-in-out infinite;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .v2-anim-pulse-ring,
+  .v2-anim-shimmer { animation: none; }
+}
