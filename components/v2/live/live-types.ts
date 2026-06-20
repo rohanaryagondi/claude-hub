@@ -29,6 +29,8 @@ export interface ActiveSessionFull {
   assistant_message_count: number
   tool_counts: Record<string, number>
   first_prompt: string
+  /** User-set session title (`/title`), when present. */
+  custom_title?: string
   last_user_turn?: string
   recent_turns: RecentTurn[]
   is_live: boolean
@@ -73,7 +75,10 @@ export function fmtTokens(n: number): string {
 }
 
 export function fmtCost(n: number): string {
-  return `$${(n ?? 0).toFixed(2)}`
+  const v = n ?? 0
+  // A live session that's spent a fraction of a cent shouldn't read as free.
+  if (v > 0 && v < 0.01) return '<$0.01'
+  return `$${v.toFixed(2)}`
 }
 
 /* ── Relative age, compact ("12s", "4m", "2h", "3d") ──────────────────────── */

@@ -6,8 +6,11 @@ import {
   listProjectSlugs,
   listProjectJSONLFiles,
   readJSONLLines,
+  isSubagentSession,
+  isLikelyExcludedSlug,
 } from '@/lib/claude-reader'
 import { estimateTotalCostFromModel } from '@/lib/pricing'
+import { localDayKey } from '@/lib/decode'
 
 export const dynamic = 'force-dynamic'
 
@@ -83,8 +86,29 @@ function extractLastUserTurn(lines: any[]): string {
   return ''
 }
 
+// Parsed-transcript cache keyed by file path + mtime. The home page polls this
+// route every 2s while a session is live; a stable session that's "waiting on
+// you" otherwise re-reads + re-parses its (often multi-hundred-KB) JSONL ~30×/min
+// for no reason. Caching by mtime makes the hot poll near-free for unchanged
+// files. Bounded: entries that fall out of the active window are evicted each scan.
+const turnCache = new Map<string, {
+  mtimeMs: number
+  recentTurns: ReturnType<typeof extractRecentTurns>
+  lastUserTurn: string
+}>()
+
 export async function GET() {
   const now = Date.now()
+
+  // Parsed session metadata (cached). Only sessions in this set can ever appear in
+  // the cockpit (the activeEntries filter drops anything not here), so we stat ONLY
+  // their files — never the rest of ~/.claude. This keeps the 2s poll cheap and,
+  // crucially, immune to the app's own ~/.claude-hub/agent dir, which grows
+  // unboundedly (catch-up / recall / memory subprocesses) and used to be stat'd
+  // every poll, slowly choking the live deck as it filled up.
+  const allSessions = await getAllParsedSessions()
+  const sessionMap = new Map(allSessions.map(s => [s.session_id, s]))
+  const wantedIds = new Set(allSessions.map(s => s.session_id))
 
   const slugs = await listProjectSlugs()
 
@@ -92,23 +116,19 @@ export async function GET() {
   const fileEntries: FileEntry[] = []
 
   await Promise.all(slugs.map(async (slug) => {
+    // Skip the app's own agent/temp dirs before even listing them.
+    if (isLikelyExcludedSlug(slug)) return
     const files = await listProjectJSONLFiles(slug)
     await Promise.all(files.map(async (filePath) => {
+      const sessionId = path.basename(filePath, '.jsonl')
+      // Stat only files for sessions that can actually be shown.
+      if (!wantedIds.has(sessionId)) return
       try {
         const stat = await fs.stat(filePath)
-        fileEntries.push({
-          slug,
-          filePath,
-          sessionId: path.basename(filePath, '.jsonl'),
-          mtimeMs: stat.mtimeMs,
-        })
+        fileEntries.push({ slug, filePath, sessionId, mtimeMs: stat.mtimeMs })
       } catch { /* file removed */ }
     }))
   }))
-
-  // Get parsed session metadata (cached)
-  const allSessions = await getAllParsedSessions()
-  const sessionMap = new Map(allSessions.map(s => [s.session_id, s]))
 
   // Filter to sessions active within the last hour, excluding subagent worktrees
   const activeEntries = fileEntries.filter(f => {
@@ -117,7 +137,9 @@ export async function GET() {
     // subprocess sessions in ~/.claude-hub/agent or temp dirs) or unparsed. Skip —
     // this keeps the live cockpit from showing our own "Excerpts…" calls.
     if (!session) return false
-    // Exclude worktree sessions spawned by subagents
+    // Keep the live cockpit focused on the user's own work: drop SDK-dispatched
+    // subagent runs (e.g. 'briefing researcher' agents) and worktree sessions.
+    if (isSubagentSession(session)) return false
     const projectPath = session.project_path ?? ''
     if (projectPath.includes('/.claude/worktrees/')) return false
 
@@ -131,11 +153,20 @@ export async function GET() {
   const results = await Promise.all(activeEntries.map(async (f) => {
     const session = sessionMap.get(f.sessionId)
 
-    const lines: Record<string, unknown>[] = []
-    await readJSONLLines(f.filePath, line => lines.push(line))
-
-    const recentTurns = extractRecentTurns(lines)
-    const lastUserTurn = extractLastUserTurn(lines)
+    // Reuse the parsed transcript when the file hasn't changed since last poll.
+    let recentTurns: ReturnType<typeof extractRecentTurns>
+    let lastUserTurn: string
+    const cached = turnCache.get(f.filePath)
+    if (cached && cached.mtimeMs === f.mtimeMs) {
+      recentTurns = cached.recentTurns
+      lastUserTurn = cached.lastUserTurn
+    } else {
+      const lines: Record<string, unknown>[] = []
+      await readJSONLLines(f.filePath, line => lines.push(line))
+      recentTurns = extractRecentTurns(lines)
+      lastUserTurn = extractLastUserTurn(lines)
+      turnCache.set(f.filePath, { mtimeMs: f.mtimeMs, recentTurns, lastUserTurn })
+    }
 
     // Compute cost from model_usage
     let totalCost = 0
@@ -158,6 +189,7 @@ export async function GET() {
       assistant_message_count: session?.assistant_message_count ?? 0,
       tool_counts: session?.tool_counts ?? {},
       first_prompt: session?.first_prompt ?? '',
+      custom_title: session?.custom_title,
       estimated_cost: totalCost,
       is_live: isLive,
       recent_turns: recentTurns,
@@ -165,27 +197,39 @@ export async function GET() {
     }
   }))
 
+  // Evict transcript-cache entries that dropped out of the active window.
+  const activePaths = new Set(activeEntries.map(f => f.filePath))
+  for (const key of turnCache.keys()) {
+    if (!activePaths.has(key)) turnCache.delete(key)
+  }
+
   results.sort((a, b) => b.file_mtime_ms - a.file_mtime_ms)
 
-  // Today's aggregate stats
-  const todayStr = new Date(now).toISOString().slice(0, 10)
+  // Today's aggregate stats — counted by the LOCAL day each TOKEN was spent (not
+  // by session start), so a long session begun days ago still credits its tokens
+  // to today. Keyed on the user's local day so it rolls over at their midnight.
+  const todayStr = localDayKey(new Date(now))
   let todayTokens = 0
   let todayCost = 0
   let todaySessionCount = 0
+  const activeDates = new Set<string>()
   for (const s of allSessions) {
-    if ((s.start_time ?? '').slice(0, 10) !== todayStr) continue
+    const byDay = s.usage_by_day
+    if (!byDay) continue
+    for (const day of Object.keys(byDay)) activeDates.add(day)
+    const todayModels = byDay[todayStr]
+    if (!todayModels) continue
     todaySessionCount++
-    todayTokens += (s.input_tokens ?? 0) + (s.output_tokens ?? 0)
-    for (const [model, usage] of Object.entries(s.model_usage ?? {})) {
+    for (const [model, usage] of Object.entries(todayModels)) {
+      todayTokens += (usage.inputTokens ?? 0) + (usage.outputTokens ?? 0)
       todayCost += estimateTotalCostFromModel(model, usage)
     }
   }
 
-  // Current streak (days with at least one session, counting back from today)
-  const activeDates = new Set(allSessions.map(s => (s.start_time ?? '').slice(0, 10)).filter(Boolean))
+  // Current streak (local days with at least one session, counting back from today)
   let streak = 0
   const streakDate = new Date(now)
-  while (activeDates.has(streakDate.toISOString().slice(0, 10))) {
+  while (activeDates.has(localDayKey(streakDate))) {
     streak++
     streakDate.setDate(streakDate.getDate() - 1)
   }

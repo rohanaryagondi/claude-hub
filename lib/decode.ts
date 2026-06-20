@@ -84,6 +84,7 @@ export function formatDurationMs(ms: number): string {
 
 export function formatRelativeDate(dateStr: string): string {
   const date = new Date(dateStr)
+  if (Number.isNaN(date.getTime())) return ''
   const now = new Date()
   const diffMs = now.getTime() - date.getTime()
   const diffDays = Math.floor(diffMs / 86_400_000)
@@ -101,7 +102,9 @@ export function formatRelativeDate(dateStr: string): string {
 }
 
 export function formatDate(dateStr: string): string {
-  return new Date(dateStr).toLocaleDateString('en-US', {
+  const d = new Date(dateStr)
+  if (Number.isNaN(d.getTime())) return ''
+  return d.toLocaleDateString('en-US', {
     month: 'short',
     day: 'numeric',
     year: 'numeric',
@@ -109,7 +112,9 @@ export function formatDate(dateStr: string): string {
 }
 
 export function formatDateTime(dateStr: string): string {
-  return new Date(dateStr).toLocaleString('en-US', {
+  const d = new Date(dateStr)
+  if (Number.isNaN(d.getTime())) return ''
+  return d.toLocaleString('en-US', {
     month: 'short',
     day: 'numeric',
     hour: '2-digit',
@@ -118,7 +123,16 @@ export function formatDateTime(dateStr: string): string {
 }
 
 export function formatTimestamp(ts: number): string {
+  // new Date(NaN).toISOString() throws, so guard before converting.
+  if (!Number.isFinite(ts)) return ''
   return formatDateTime(new Date(ts).toISOString())
+}
+
+/** Local-day key (YYYY-MM-DD in the server's = the user's timezone), for grouping
+ *  sessions by wall-clock day instead of UTC. Using UTC (`toISOString().slice(0,10)`)
+ *  makes "today" and the streak roll over at UTC midnight, not the user's midnight. */
+export function localDayKey(d: Date): string {
+  return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`
 }
 
 // ─── Percentage ──────────────────────────────────────────────────────────────

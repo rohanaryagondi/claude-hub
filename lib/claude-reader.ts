@@ -8,7 +8,7 @@ import type {
   HistoryEntry,
   ModelUsage,
 } from '@/types/claude'
-import { slugToPath } from '@/lib/decode'
+import { slugToPath, localDayKey } from '@/lib/decode'
 
 function stripXmlTags(text: string): string {
   return text.replace(/<[^>]+>[\s\S]*?<\/[^>]+>/g, '').replace(/<[^>]+\/>/g, '').replace(/<[^>]+>/g, '').trim()
@@ -23,9 +23,41 @@ export interface ParsedSession extends SessionMeta {
   cwd?: string
   slug_name?: string
   cc_version?: string
+  /** Claude Code launch context: 'cli' (terminal) / 'claude-desktop' = a human
+   *  session; 'sdk-cli' = a programmatic Agent-SDK launch. */
+  entrypoint?: string
+  /** True if any turn ran in a permission mode the user actively chose (plan /
+   *  accept-edits / skip-permissions) — evidence the session was human-driven. */
+  interactive_perm?: boolean
   git_branch?: string
   has_compaction: boolean
   has_thinking: boolean
+}
+
+/** True for a subagent session — one Claude or the Agent SDK spawned, not the user.
+ *
+ *  Structural signals only (no prompt-text matching), in precedence order:
+ *   1. renamed by the user (custom_title)            → always theirs
+ *   2. launched by the Agent SDK CLI (entrypoint 'sdk-cli') → a subagent
+ *   3. human-driven: a terminal ('cli') session, or one run in a permission mode the
+ *      user actively chose (plan / accept-edits / skip-permissions) → theirs
+ *   4. otherwise (a default-permission run the user never drove or renamed)
+ *                                                    → a programmatically-spawned subagent
+ *
+ *  NOTE: `promptSource: 'sdk'` is deliberately NOT used — Claude Desktop stamps that
+ *  on human prompts too (verified on a real interactive session), so it false-flags
+ *  the user's own desktop sessions. Permission mode + entrypoint are the reliable
+ *  human-driven signals.
+ */
+export function isSubagentSession(s: {
+  custom_title?: string
+  entrypoint?: string
+  interactive_perm?: boolean
+}): boolean {
+  if (s.custom_title && s.custom_title.trim()) return false
+  if (s.entrypoint === 'sdk-cli') return true
+  if (s.entrypoint === 'cli' || s.interactive_perm) return false
+  return true
 }
 
 interface CacheEntry {
@@ -41,6 +73,87 @@ const projectCwdCache = new Map<string, string>()
 const ALL_SESSIONS_TTL_MS = 4_000
 let _allSessionsCache: { data: ParsedSession[]; ts: number } | null = null
 let _allSessionsInFlight: Promise<ParsedSession[]> | null = null
+
+// Disk-usage of ~/.claude (a recursive stat over tens of thousands of files) is
+// expensive and changes slowly, so cache it stale-while-revalidate: only the very
+// first call ever awaits the walk; after that, callers get the last value instantly
+// while a refresh runs in the background once the value is older than the TTL.
+const STORAGE_BYTES_TTL_MS = 5 * 60 * 1000
+const STORAGE_BYTES_PATH = path.join(os.homedir(), '.claude-hub', 'storage-bytes.json')
+let _storageBytesCache: { bytes: number; ts: number } | null = null
+let _storageBytesInFlight: Promise<number> | null = null
+let _storageBytesSeeded = false
+
+async function seedStorageBytesFromDisk(): Promise<void> {
+  try {
+    const d = JSON.parse(await fs.readFile(STORAGE_BYTES_PATH, 'utf-8')) as { bytes?: number; ts?: number }
+    if (typeof d.bytes === 'number') _storageBytesCache = { bytes: d.bytes, ts: d.ts ?? 0 }
+  } catch { /* none yet */ }
+}
+
+async function persistStorageBytes(bytes: number): Promise<void> {
+  try {
+    await fs.mkdir(path.dirname(STORAGE_BYTES_PATH), { recursive: true })
+    await fs.writeFile(STORAGE_BYTES_PATH, JSON.stringify({ bytes, ts: Date.now() }))
+  } catch { /* best-effort */ }
+}
+
+// Disk-persisted per-file parse cache. Parsing ~9k JSONL files from scratch on a
+// fresh server is the one slow ("cold") path; persisting the parsed results keyed
+// by file mtime lets a restart reload them instantly and re-parse only the handful
+// of files that changed. Bump PARSE_CACHE_VERSION whenever ParsedSession's shape
+// changes so a stale cache is discarded (never served as wrong data) instead of
+// reused. Lives in ~/.claude-hub (regenerable; safe to delete).
+const PARSE_CACHE_VERSION = 1
+const PARSE_CACHE_PATH = path.join(os.homedir(), '.claude-hub', 'parse-cache.json')
+const PARSE_CACHE_MIN_PERSIST_MS = 30_000 // write at most this often
+interface PersistedParse { mtimeMs: number; session: ParsedSession | null }
+let _parseCacheSeeded = false
+let _parseCachePersistTimer: ReturnType<typeof setTimeout> | null = null
+let _lastParsePersistMs = 0
+
+/** Seed the in-memory per-file cache from disk (once, on first build after start).
+ *  Best-effort: a missing / unreadable / version-mismatched cache just means we
+ *  parse fresh. Never overwrites a fresher in-memory entry. */
+async function seedParseCacheFromDisk(): Promise<void> {
+  try {
+    const raw = await fs.readFile(PARSE_CACHE_PATH, 'utf-8')
+    const data = JSON.parse(raw) as { version?: number; files?: Record<string, PersistedParse> }
+    if (data.version !== PARSE_CACHE_VERSION || !data.files) return
+    for (const [filePath, entry] of Object.entries(data.files)) {
+      if (!sessionCache.has(filePath)) {
+        sessionCache.set(filePath, { mtimeMs: entry.mtimeMs, promise: Promise.resolve(entry.session) })
+      }
+    }
+  } catch { /* no cache yet / unreadable — parse fresh */ }
+}
+
+/** Snapshot the resolved per-file cache to disk atomically (temp + rename). */
+async function persistParseCache(): Promise<void> {
+  try {
+    const files: Record<string, PersistedParse> = {}
+    for (const [filePath, entry] of sessionCache) {
+      files[filePath] = { mtimeMs: entry.mtimeMs, session: await entry.promise }
+    }
+    await fs.mkdir(path.dirname(PARSE_CACHE_PATH), { recursive: true })
+    const tmp = `${PARSE_CACHE_PATH}.${process.pid}.tmp`
+    await fs.writeFile(tmp, JSON.stringify({ version: PARSE_CACHE_VERSION, files }))
+    await fs.rename(tmp, PARSE_CACHE_PATH)
+  } catch { /* best-effort cache; in-memory parse still works */ }
+}
+
+/** Throttled, non-blocking persist — coalesces a burst of rebuilds into one write
+ *  and never blocks a request. */
+function scheduleParseCachePersist(): void {
+  if (_parseCachePersistTimer) return
+  const delay = Math.max(0, PARSE_CACHE_MIN_PERSIST_MS - (Date.now() - _lastParsePersistMs))
+  _parseCachePersistTimer = setTimeout(() => {
+    _parseCachePersistTimer = null
+    _lastParsePersistMs = Date.now()
+    void persistParseCache()
+  }, delay)
+  _parseCachePersistTimer.unref?.()
+}
 
 /** Resolve the real filesystem path for a project slug by reading `cwd` from its JSONL files */
 export async function resolveProjectPath(slug: string): Promise<string> {
@@ -98,6 +211,14 @@ async function parseSessionFile(filePath: string, sessionId: string): Promise<Pa
   let cacheRead = 0
   let cacheWrite = 0
   let firstPrompt = ''
+  let customTitle: string | undefined
+  // Token usage from dispatched subagents (Task/Agent tool results). Claude Code
+  // records each subagent's full usage in the parent's tool result and does NOT
+  // file the subagent transcript as its own session, so the parent absorbs it.
+  let subInput = 0
+  let subOutput = 0
+  let subCacheRead = 0
+  let subCacheWrite = 0
   let hasTaskAgent = false
   let hasMcp = false
   let hasWebSearch = false
@@ -107,10 +228,17 @@ async function parseSessionFile(filePath: string, sessionId: string): Promise<Pa
   let cwd: string | undefined
   let slugName: string | undefined
   let ccVersion: string | undefined
+  let entrypoint: string | undefined
+  // True once any turn ran in a permission mode the user actively chose (plan /
+  // accept-edits / skip-permissions) — a signal the session was human-driven.
+  let interactivePerm = false
   let gitBranch: string | undefined
   let hasCompaction = false
   let hasThinking = false
   const modelUsage: Record<string, ModelUsage> = {}
+  // Token usage bucketed by LOCAL calendar day → model, so "today" / per-day views
+  // reflect tokens SPENT on a day even in sessions that began on an earlier day.
+  const usageByDay: Record<string, Record<string, ModelUsage>> = {}
 
   try {
     const raw = await fs.readFile(filePath, 'utf-8')
@@ -126,7 +254,16 @@ async function parseSessionFile(filePath: string, sessionId: string): Promise<Pa
         }
         if (!cwd && typeof obj.cwd === 'string') cwd = obj.cwd
         if (!slugName && typeof obj.slug === 'string') slugName = obj.slug
+        // A user-set session title (`/title`). The file may carry several as the
+        // user renames; keep the LAST (most recent) one.
+        if (obj.type === 'custom-title' && typeof obj.customTitle === 'string' && obj.customTitle.trim()) {
+          customTitle = obj.customTitle.trim()
+        }
         if (!ccVersion && typeof obj.version === 'string') ccVersion = obj.version
+        if (!entrypoint && typeof obj.entrypoint === 'string') entrypoint = obj.entrypoint
+        if (obj.permissionMode === 'bypassPermissions' || obj.permissionMode === 'acceptEdits' || obj.permissionMode === 'plan') {
+          interactivePerm = true
+        }
         if (typeof obj.gitBranch === 'string' && obj.gitBranch !== 'HEAD' && !gitBranch) {
           gitBranch = obj.gitBranch
         }
@@ -178,6 +315,24 @@ async function parseSessionFile(filePath: string, sessionId: string): Promise<Pa
               existing.cacheReadInputTokens += turnCacheRead
               existing.cacheCreationInputTokens += turnCacheWrite
               modelUsage[msg.model] = existing
+
+              // Same usage, bucketed by the turn's local day for accurate "today".
+              let day: string | undefined
+              if (ts) {
+                const dd = new Date(ts)
+                if (!Number.isNaN(dd.getTime())) day = localDayKey(dd)
+              }
+              if (day) {
+                const byModel = usageByDay[day] ?? (usageByDay[day] = {})
+                const dm = byModel[msg.model] ?? (byModel[msg.model] = {
+                  inputTokens: 0, outputTokens: 0, cacheReadInputTokens: 0,
+                  cacheCreationInputTokens: 0, costUSD: 0, webSearchRequests: 0,
+                })
+                dm.inputTokens += turnInput
+                dm.outputTokens += turnOutput
+                dm.cacheReadInputTokens += turnCacheRead
+                dm.cacheCreationInputTokens += turnCacheWrite
+              }
             }
           }
           const content = msg?.content
@@ -195,6 +350,24 @@ async function parseSessionFile(filePath: string, sessionId: string): Promise<Pa
             }
           }
         }
+        // A Task/Agent tool result carries the dispatched subagent's full token
+        // usage (with a per-iteration breakdown). Accumulate it; it's folded into
+        // the session totals after the scan. Not double-counted: the tool-result
+        // line has no message.usage of its own.
+        const tur = obj.toolUseResult as
+          | { agentId?: string; usage?: Record<string, unknown> }
+          | undefined
+        if (tur && tur.agentId && tur.usage) {
+          const num = (o: Record<string, unknown>, k: string) => Number(o[k]) || 0
+          const iters = (tur.usage as { iterations?: Record<string, unknown>[] }).iterations
+          const rows = Array.isArray(iters) && iters.length ? iters : [tur.usage]
+          for (const u of rows) {
+            subInput += num(u, 'input_tokens')
+            subOutput += num(u, 'output_tokens')
+            subCacheRead += num(u, 'cache_read_input_tokens')
+            subCacheWrite += num(u, 'cache_creation_input_tokens')
+          }
+        }
       } catch { /* skip malformed line */ }
     }
   } catch {
@@ -202,6 +375,30 @@ async function parseSessionFile(filePath: string, sessionId: string): Promise<Pa
   }
 
   if (!startTime) return null
+
+  // Roll the accumulated subagent usage into this session's token totals, and into
+  // its dominant model so per-model cost stays consistent with the token totals.
+  if (subInput || subOutput || subCacheRead || subCacheWrite) {
+    inputTokens += subInput
+    outputTokens += subOutput
+    cacheRead += subCacheRead
+    cacheWrite += subCacheWrite
+    let domModel: string | undefined
+    let domOut = -1
+    for (const [m, u] of Object.entries(modelUsage)) {
+      if (u.outputTokens > domOut) { domOut = u.outputTokens; domModel = m }
+    }
+    const target = domModel ?? 'claude-opus-4-7'
+    const e = modelUsage[target] ?? {
+      inputTokens: 0, outputTokens: 0, cacheReadInputTokens: 0,
+      cacheCreationInputTokens: 0, costUSD: 0, webSearchRequests: 0,
+    }
+    e.inputTokens += subInput
+    e.outputTokens += subOutput
+    e.cacheReadInputTokens += subCacheRead
+    e.cacheCreationInputTokens += subCacheWrite
+    modelUsage[target] = e
+  }
 
   const start = new Date(startTime).getTime()
   const end = lastTime ? new Date(lastTime).getTime() : start
@@ -224,6 +421,7 @@ async function parseSessionFile(filePath: string, sessionId: string): Promise<Pa
     cache_creation_input_tokens: cacheWrite,
     cache_read_input_tokens: cacheRead,
     first_prompt: firstPrompt,
+    custom_title: customTitle,
     user_interruptions: 0,
     user_response_times: [],
     tool_errors: 0,
@@ -238,9 +436,12 @@ async function parseSessionFile(filePath: string, sessionId: string): Promise<Pa
     message_hours: messageHours,
     user_message_timestamps: userMessageTimestamps,
     model_usage: modelUsage,
+    usage_by_day: usageByDay,
     cwd,
     slug_name: slugName,
     cc_version: ccVersion,
+    entrypoint,
+    interactive_perm: interactivePerm,
     git_branch: gitBranch,
     has_compaction: hasCompaction,
     has_thinking: hasThinking,
@@ -296,6 +497,13 @@ async function _buildAllParsedSessions(): Promise<ParsedSession[]> {
   // still gets parsed and caught by the post-parse exclusion below.
   slugs = slugs.filter((s) => !isLikelyExcludedSlug(s))
 
+  // Seed the per-file cache from disk once, so the first build after a restart
+  // reuses parsed sessions instead of re-reading + re-parsing every JSONL file.
+  if (!_parseCacheSeeded) {
+    _parseCacheSeeded = true
+    await seedParseCacheFromDisk()
+  }
+
   type FileEntry = { slug: string; filePath: string; sessionId: string; mtimeMs: number }
   const fileEntries: FileEntry[] = []
 
@@ -316,8 +524,9 @@ async function _buildAllParsedSessions(): Promise<ParsedSession[]> {
 
   // Evict cache entries for files that no longer exist
   const seen = new Set(fileEntries.map(f => f.filePath))
+  let cacheChanged = false
   for (const key of sessionCache.keys()) {
-    if (!seen.has(key)) sessionCache.delete(key)
+    if (!seen.has(key)) { sessionCache.delete(key); cacheChanged = true }
   }
 
   // Parse (or reuse cached) in parallel; cache stores the in-flight promise so
@@ -329,8 +538,13 @@ async function _buildAllParsedSessions(): Promise<ParsedSession[]> {
     }
     const promise = parseSessionFile(f.filePath, f.sessionId)
     sessionCache.set(f.filePath, { mtimeMs: f.mtimeMs, promise })
+    cacheChanged = true // a file was new or changed → the on-disk cache is stale
     return { slug: f.slug, session: await promise }
   }))
+
+  // Persist the refreshed cache (throttled, non-blocking) so the next cold start
+  // is fast. No-op when nothing changed (steady state writes nothing).
+  if (cacheChanged) scheduleParseCachePersist()
 
   // Build slug → cwd map from any session that captured one
   const slugCwd = new Map<string, string>()
@@ -348,12 +562,19 @@ async function _buildAllParsedSessions(): Promise<ParsedSession[]> {
   const results: ParsedSession[] = []
   for (const { slug, session } of parsed) {
     if (!session) continue
-    const project_path = slugCwd.get(slug) ?? slugToPath(slug)
+    // Fold git-worktree sessions back into their base project so the user's
+    // worktree work shows under the real project, not a phantom per-worktree one.
+    const project_path = deWorktreePath(slugCwd.get(slug) ?? slugToPath(slug))
     // Exclude Claude Hub's OWN recall/memory subprocess sessions: the claude CLI
     // logs a session for every /api/ask + memory build call under a temp/agent
     // cwd. Those recursive "Excerpts from past sessions…" sessions are not the
     // user's work and would flood the index, citations, and live cockpit.
     if (isExcludedProjectPath(project_path)) continue
+    // Drop subagent sessions Claude / the SDK spawned (see isSubagentSession: SDK
+    // launch, or default-permission runs the user never renamed) from every list —
+    // the user's own interactive/renamed sessions stay. (In-tool Task/Agent subagent
+    // *tokens* were folded into their parent during the per-file scan above.)
+    if (isSubagentSession(session)) continue
     results.push({ ...session, project_path })
   }
 
@@ -361,14 +582,24 @@ async function _buildAllParsedSessions(): Promise<ParsedSession[]> {
   return results
 } // end _buildAllParsedSessions
 
+/** Map a git-worktree session path back to its base project, so worktree work shows
+ *  under the real project instead of as a phantom per-worktree project.
+ *  `…/Jarvis/.claude/worktrees/foo` → `…/Jarvis`. Non-worktree paths pass through. */
+export function deWorktreePath(p: string): string {
+  const i = p.indexOf('/.claude/worktrees/')
+  return i === -1 ? p : p.slice(0, i)
+}
+
 /** True for project paths that are NOT real user work: Claude Hub's own agent cwd
- *  (~/.claude-hub/agent) and system temp dirs (where headless claude subprocesses
- *  and earlier test sandboxes ran). Excluded everywhere session lists feed, so the
- *  app never indexes its own recall calls. */
+ *  (~/.claude-hub/agent, plus the legacy ~/.cc-lens/agent data dir from an earlier
+ *  install) and system temp dirs (where headless claude subprocesses and earlier
+ *  test sandboxes ran). Excluded everywhere session lists feed, so the app never
+ *  indexes its own recall calls. */
 export function isExcludedProjectPath(p: string): boolean {
   if (!p) return false
   return (
     p.includes('/.claude-hub/') ||
+    p.includes('/.cc-lens/') ||
     p.startsWith('/tmp/') ||
     p.startsWith('/private/tmp/') ||
     p.startsWith('/private/var/folders/') ||
@@ -379,12 +610,14 @@ export function isExcludedProjectPath(p: string): boolean {
 
 /** Cheap slug-level counterpart to isExcludedProjectPath, applied BEFORE any
  *  file stat/parse. Matches the encoded project-dir names for the app's own
- *  agent/data cwds (`/.claude-hub/…` → `--claude-hub`) and system temp dirs.
- *  Deliberately conservative — it only skips what isExcludedProjectPath would
- *  discard anyway, so it changes performance, not which sessions appear. */
+ *  agent/data cwds (`/.claude-hub/…` → `--claude-hub`, legacy `/.cc-lens/…` →
+ *  `--cc-lens`) and system temp dirs. Deliberately conservative — it only skips
+ *  what isExcludedProjectPath would discard anyway, so it changes performance,
+ *  not which sessions appear. */
 export function isLikelyExcludedSlug(slug: string): boolean {
   return (
     slug.includes('--claude-hub') ||
+    slug.includes('--cc-lens') ||
     slug === '-tmp' || slug === '-private-tmp' ||
     slug.startsWith('-tmp-') ||
     slug.startsWith('-private-tmp-') ||
@@ -774,25 +1007,54 @@ export async function readMemories(): Promise<MemoryEntry[]> {
 // ─── Storage size ─────────────────────────────────────────────────────────────
 
 export async function getClaudeStorageBytes(): Promise<number> {
+  // On the first call of a fresh process, load the last value from disk so the
+  // cold path returns instantly (the recursive 45k-file walk runs in the
+  // background) instead of blocking the first /stats load on it.
+  if (!_storageBytesSeeded) {
+    _storageBytesSeeded = true
+    if (!_storageBytesCache) await seedStorageBytesFromDisk()
+  }
+  const now = Date.now()
+  // Fresh enough → instant.
+  if (_storageBytesCache && now - _storageBytesCache.ts < STORAGE_BYTES_TTL_MS) {
+    return _storageBytesCache.bytes
+  }
+  const refresh = () =>
+    (_storageBytesInFlight ??= computeStorageBytes()
+      .then(b => { _storageBytesCache = { bytes: b, ts: Date.now() }; void persistStorageBytes(b); return b })
+      .finally(() => { _storageBytesInFlight = null }))
+  // Stale value exists (in-memory or from disk) → serve it now, refresh in bg.
+  if (_storageBytesCache) {
+    void refresh()
+    return _storageBytesCache.bytes
+  }
+  // Truly cold (no value anywhere yet) → must await the walk once.
+  return refresh()
+}
+
+async function computeStorageBytes(): Promise<number> {
   async function dirSize(dirPath: string): Promise<number> {
-    let total = 0
+    let entries
     try {
-      const entries = await fs.readdir(dirPath, { withFileTypes: true })
-      await Promise.all(
-        entries.map(async e => {
-          const full = path.join(dirPath, e.name)
-          if (e.isDirectory()) {
-            total += await dirSize(full)
-          } else {
-            try {
-              const stat = await fs.stat(full)
-              total += stat.size
-            } catch { /* skip */ }
-          }
-        })
-      )
-    } catch { /* skip inaccessible dirs */ }
-    return total
+      entries = await fs.readdir(dirPath, { withFileTypes: true })
+    } catch {
+      return 0 // inaccessible dir
+    }
+    // Each entry resolves to its own size and we sum the results — NOT a shared
+    // `total += await …` accumulator, which races under Promise.all (concurrent
+    // callbacks all read 0 and overwrite each other, undercounting wildly).
+    const sizes = await Promise.all(
+      entries.map(async e => {
+        const full = path.join(dirPath, e.name)
+        if (e.isDirectory()) return dirSize(full)
+        try {
+          return (await fs.stat(full)).size
+        } catch {
+          return 0
+        }
+      })
+    )
+    return sizes.reduce((a, b) => a + b, 0)
   }
   return dirSize(CLAUDE_DIR)
 }

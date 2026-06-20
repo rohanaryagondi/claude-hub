@@ -11,6 +11,8 @@ interface ModelPricing {
 // 5-minute ephemeral rate (the common case); users can override via
 // ~/.claude-hub/pricing.json. Source: claude.com/pricing as of 2026-05.
 const DEFAULT_PRICING_PER_MTOK: Record<string, ModelPricing> = {
+  // Fable 5 — premium generation — $10 / $50 (cacheWrite = 5-minute ephemeral rate)
+  'claude-fable-5':    { input: 10.00, output: 50.00, cacheWrite: 12.50, cacheRead: 1.00 },
   // Opus 4.x current generation — $5 / $25
   'claude-opus-4-7':   { input: 5.00, output: 25.00, cacheWrite: 6.25,  cacheRead: 0.50 },
   'claude-opus-4-6':   { input: 5.00, output: 25.00, cacheWrite: 6.25,  cacheRead: 0.50 },

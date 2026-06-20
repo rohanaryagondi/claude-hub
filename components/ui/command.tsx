@@ -32,6 +32,7 @@ function CommandDialog({
       <DialogContent
         className="overflow-hidden p-0 max-w-xl"
         showCloseButton={false}
+        aria-describedby={undefined}
       >
         <VisuallyHidden.Root>
           <DialogTitle>Command Palette</DialogTitle>

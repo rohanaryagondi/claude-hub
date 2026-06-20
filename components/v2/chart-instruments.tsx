@@ -20,6 +20,7 @@ import {
   type ToolCat,
   fmtTokens,
   fmtInt,
+  fmtCost,
   prettyModel,
   modelColor,
 } from './chart-theme'
@@ -303,6 +304,95 @@ export function ModelMix({ data }: { data: ModelSlice[] }) {
 }
 
 /* ═══════════════════════════════════════════════════════════════════════════
+   2b. BY PROJECT — token volume + estimated cost per project. A ranked bar list
+   (token = blue, cost = red) answering "where is my usage / spend going". The
+   bar length is proportional to the busiest project's tokens.
+   ═══════════════════════════════════════════════════════════════════════════ */
+export interface ProjectStat {
+  name: string
+  tokens: number
+  cost: number
+}
+
+export function ProjectBreakdown({ data, limit = 7 }: { data: ProjectStat[]; limit?: number }) {
+  const c = useChartColors()
+  const all = data.filter((d) => d.tokens > 0).sort((a, b) => b.tokens - a.tokens)
+  if (!all.length) return <EmptyChart c={c} height={120} label="no project usage in range" />
+  const rows = all.slice(0, limit)
+  const max = rows[0].tokens
+  const extra = all.length - rows.length
+
+  return (
+    <div className="flex flex-col" style={{ gap: 7 }}>
+      {rows.map((p) => {
+        const pct = max > 0 ? (p.tokens / max) * 100 : 0
+        return (
+          <div key={p.name} className="flex flex-col" style={{ gap: 2.5 }}>
+            <div className="flex items-baseline gap-1.5">
+              <span
+                title={p.name}
+                style={{
+                  fontFamily: 'var(--v2-font-sans)',
+                  fontSize: 12,
+                  color: c.text,
+                  flex: 1,
+                  minWidth: 0,
+                  overflow: 'hidden',
+                  textOverflow: 'ellipsis',
+                  whiteSpace: 'nowrap',
+                }}
+              >
+                {p.name}
+              </span>
+              <span
+                style={{ fontFamily: FONT_MONO, fontSize: 11, fontVariantNumeric: 'tabular-nums', color: c.token }}
+              >
+                {fmtTokens(p.tokens)}
+              </span>
+              <span
+                style={{
+                  fontFamily: FONT_MONO,
+                  fontSize: 11,
+                  fontVariantNumeric: 'tabular-nums',
+                  color: c.cost,
+                  width: 56,
+                  textAlign: 'right',
+                }}
+              >
+                {fmtCost(p.cost)}
+              </span>
+            </div>
+            <div style={{ height: 5, borderRadius: 3, background: c['surface-2'], overflow: 'hidden' }}>
+              <div
+                style={{
+                  width: `${pct}%`,
+                  height: '100%',
+                  background: c.token,
+                  minWidth: pct > 0 ? 2 : 0,
+                  borderRadius: 3,
+                }}
+              />
+            </div>
+          </div>
+        )
+      })}
+      {extra > 0 && (
+        <div
+          style={{
+            fontFamily: FONT_MONO,
+            fontSize: 10.5,
+            color: c.faint,
+            paddingTop: 1,
+          }}
+        >
+          +{extra} more {extra === 1 ? 'project' : 'projects'}
+        </div>
+      )}
+    </div>
+  )
+}
+
+/* ═══════════════════════════════════════════════════════════════════════════
    3. PEAK HOURS — a plain 24-hour hour-of-day bar chart (x = 0..23, y = tokens).
    Replaces the old radial dial: a Cartesian bar reads instantly. The single
    peak hour is highlighted in --v2-accent; every other bar is --v2-token. Terse
@@ -555,15 +645,18 @@ export function ActivityHeatmap({ data }: { data: HeatDay[] }) {
     return `color-mix(in srgb, ${c.token} ${pct}%, ${c['surface-2']})`
   }
 
-  const CELL = 12
-  const GAP = 3
+  // Cells stretch to fill the column width: each week is a flex:1 column and each
+  // cell is square via aspect-ratio, so the grid grows to whatever width it's given
+  // (no fixed pixel grid leaving blank space in a wide panel).
+  const GAP = 4
+  const LABEL_W = 26
 
   return (
-    <div className="flex flex-col gap-2 overflow-x-auto">
+    <div className="flex w-full flex-col gap-2">
       {/* month labels */}
-      <div className="flex" style={{ paddingLeft: 28, gap: GAP }}>
+      <div className="flex w-full" style={{ paddingLeft: LABEL_W + GAP, gap: GAP }}>
         {weeks.map((_, wi) => (
-          <div key={wi} style={{ width: CELL, position: 'relative' }}>
+          <div key={wi} style={{ flex: '1 1 0', minWidth: 0, position: 'relative', height: 12 }}>
             {monthLabels[wi] && (
               <span
                 style={{
@@ -581,17 +674,17 @@ export function ActivityHeatmap({ data }: { data: HeatDay[] }) {
         ))}
       </div>
 
-      <div className="flex" style={{ gap: GAP }}>
-        {/* weekday labels (show a few) */}
-        <div className="flex flex-col justify-between" style={{ width: 24, gap: GAP }}>
+      <div className="flex w-full" style={{ gap: GAP }}>
+        {/* weekday labels (alternating) — flex children align 1:1 with cell rows */}
+        <div className="flex flex-col" style={{ width: LABEL_W, gap: GAP }}>
           {WEEKDAYS.map((d, i) => (
             <span
               key={d}
+              className="flex items-center"
               style={{
-                height: CELL,
+                flex: '1 1 0',
                 fontFamily: FONT_MONO,
                 fontSize: 9,
-                lineHeight: `${CELL}px`,
                 color: c.faint,
                 visibility: i % 2 === 1 ? 'visible' : 'hidden',
               }}
@@ -603,15 +696,15 @@ export function ActivityHeatmap({ data }: { data: HeatDay[] }) {
 
         {/* week columns */}
         {weeks.map((week, wi) => (
-          <div key={wi} className="flex flex-col" style={{ gap: GAP }}>
+          <div key={wi} className="flex flex-col" style={{ flex: '1 1 0', minWidth: 0, gap: GAP }}>
             {week.map((day, di) => (
               <div
                 key={di}
                 title={day ? `${day.date}: ${fmtTokens(day.tokens)} tokens` : undefined}
                 style={{
-                  width: CELL,
-                  height: CELL,
-                  borderRadius: 2,
+                  width: '100%',
+                  aspectRatio: '1 / 1',
+                  borderRadius: 2.5,
                   background: day ? rampFor(day.tokens) : 'transparent',
                   border: day && day.tokens > 0 ? 'none' : day ? `1px solid ${c.border}` : 'none',
                 }}
@@ -619,29 +712,27 @@ export function ActivityHeatmap({ data }: { data: HeatDay[] }) {
             ))}
           </div>
         ))}
+      </div>
 
-        {/* legend */}
-        <div className="ml-3 flex flex-col justify-end gap-1.5 self-end pb-0.5">
-          <div className="flex items-center gap-1">
-            <span style={{ fontFamily: FONT_MONO, fontSize: 9, color: c.faint }}>less</span>
-            {[0, 0.25, 0.5, 0.75, 1].map((t) => (
-              <span
-                key={t}
-                style={{
-                  width: 10,
-                  height: 10,
-                  borderRadius: 2,
-                  background:
-                    t === 0
-                      ? c['surface-2']
-                      : `color-mix(in srgb, ${c.token} ${20 + Math.round(t * 80)}%, ${c['surface-2']})`,
-                  border: t === 0 ? `1px solid ${c.border}` : 'none',
-                }}
-              />
-            ))}
-            <span style={{ fontFamily: FONT_MONO, fontSize: 9, color: c.faint }}>more</span>
-          </div>
-        </div>
+      {/* legend — below the grid, right-aligned, so it never steals grid width */}
+      <div className="flex items-center justify-end gap-1 pt-0.5">
+        <span style={{ fontFamily: FONT_MONO, fontSize: 9, color: c.faint }}>less</span>
+        {[0, 0.25, 0.5, 0.75, 1].map((t) => (
+          <span
+            key={t}
+            style={{
+              width: 10,
+              height: 10,
+              borderRadius: 2,
+              background:
+                t === 0
+                  ? c['surface-2']
+                  : `color-mix(in srgb, ${c.token} ${20 + Math.round(t * 80)}%, ${c['surface-2']})`,
+              border: t === 0 ? `1px solid ${c.border}` : 'none',
+            }}
+          />
+        ))}
+        <span style={{ fontFamily: FONT_MONO, fontSize: 9, color: c.faint }}>more</span>
       </div>
     </div>
   )

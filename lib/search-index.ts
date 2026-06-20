@@ -89,7 +89,7 @@ interface InMemIndex {
 
 const BM25_K1 = 1.5
 const BM25_B = 0.75
-const PERSIST_VERSION = 7 // bumped: index now folds in capability/tool keywords
+const PERSIST_VERSION = 11 // bumped: subagent rule drops unreliable promptSource signal
 const MAX_USER_TEXT = 5000        // chars of user-turn text indexed per session
 const REFRESH_THROTTLE_MS = 60_000
 
@@ -222,12 +222,15 @@ function searchableText(userText: string, s: ParsedSession, mem?: SessionMem): s
   const tools = Object.keys(s.tool_counts ?? {}).join(' ')
   const capabilities = capabilityKeywords(s)
   const memText = mem ? `${mem.title ?? ''} ${mem.summary ?? ''}` : ''
-  return `${userText}\n${s.first_prompt ?? ''} ${s.slug_name ?? ''} ${name} ${tools} ${capabilities} ${memText}`.trim()
+  return `${userText}\n${s.custom_title ?? ''} ${s.first_prompt ?? ''} ${s.slug_name ?? ''} ${name} ${tools} ${capabilities} ${memText}`.trim()
 }
 
-// Resolve the human title: PREFER the MEMORY title (Claude-written) when present,
-// else fall back to the existing slug → first-prompt → short-id derivation.
+// Resolve the human title: a user-set custom title (`/title`) wins over everything;
+// then the MEMORY title (Claude-written); else the slug → first-prompt → short-id
+// derivation.
 function docTitle(s: ParsedSession, mem?: SessionMem): string {
+  const custom = s.custom_title?.trim()
+  if (custom) return custom
   const memTitle = mem?.title?.trim()
   if (memTitle) return memTitle
   return sessionTitle({ slug_name: s.slug_name, first_prompt: s.first_prompt, session_id: s.session_id })

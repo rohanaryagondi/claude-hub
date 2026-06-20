@@ -1,5 +1,6 @@
 import { type NextRequest, NextResponse } from 'next/server'
 import { readStatsCache, getSessions, getClaudeStorageBytes } from '@/lib/claude-reader'
+import { localDayKey, projectDisplayName } from '@/lib/decode'
 import { estimateTotalCostFromModel, getPricing } from '@/lib/pricing'
 import type { DailyActivity, ModelUsage, SessionMeta } from '@/types/claude'
 
@@ -16,17 +17,23 @@ export const dynamic = 'force-dynamic'
 /** Compute daily activity from session JSONL — fresher than stats-cache */
 function computeDailyActivityFromSessions(sessions: SessionMeta[]): DailyActivity[] {
   const byDate = new Map<string, { messages: number; sessions: number; tools: number; tokens: number }>()
+  const bucket = (d: string) =>
+    byDate.get(d) ?? byDate.set(d, { messages: 0, sessions: 0, tools: 0, tokens: 0 }).get(d)!
   for (const s of sessions) {
-    const date = s.start_time.slice(0, 10)
-    if (!/^\d{4}-\d{2}-\d{2}$/.test(date)) continue
-    const existing = byDate.get(date) ?? { messages: 0, sessions: 0, tools: 0, tokens: 0 }
-    existing.messages += (s.user_message_count ?? 0) + (s.assistant_message_count ?? 0)
-    existing.sessions += 1
-    existing.tools += Object.values(s.tool_counts ?? {}).reduce((a, b) => a + b, 0)
-    for (const usage of Object.values(s.model_usage ?? {})) {
-      existing.tokens += (usage.inputTokens ?? 0) + (usage.outputTokens ?? 0)
+    if (!s.start_time) continue
+    const sd = new Date(s.start_time)
+    if (Number.isNaN(sd.getTime())) continue
+    // Session-level counts credit the start day; TOKENS credit the day spent.
+    const e = bucket(localDayKey(sd))
+    e.messages += (s.user_message_count ?? 0) + (s.assistant_message_count ?? 0)
+    e.sessions += 1
+    e.tools += Object.values(s.tool_counts ?? {}).reduce((a, b) => a + b, 0)
+    for (const [day, byModel] of Object.entries(s.usage_by_day ?? {})) {
+      const d = bucket(day)
+      for (const u of Object.values(byModel)) {
+        d.tokens += (u.inputTokens ?? 0) + (u.outputTokens ?? 0)
+      }
     }
-    byDate.set(date, existing)
   }
   return Array.from(byDate.entries())
     .map(([date, { messages, sessions: count, tools, tokens }]) => ({
@@ -91,6 +98,37 @@ function computeModelUsageFromSessions(sessions: SessionMeta[]): Record<string, 
   return byModel
 }
 
+/** Model usage for tokens SPENT within [fromKey, toKey] (inclusive YYYY-MM-DD local
+ *  day keys), summed across ALL sessions via their per-day buckets — so a date
+ *  range credits tokens to the day they were used, not the session's start day.
+ *  A session that began before the window still contributes the tokens it spent
+ *  inside it. */
+function rangeModelUsageFromDays(
+  sessions: SessionMeta[],
+  fromKey: string | null,
+  toKey: string | null,
+): Record<string, ModelUsage> {
+  const byModel: Record<string, ModelUsage> = {}
+  for (const s of sessions) {
+    for (const [day, models] of Object.entries(s.usage_by_day ?? {})) {
+      if (fromKey && day < fromKey) continue
+      if (toKey && day > toKey) continue
+      for (const [model, u] of Object.entries(models)) {
+        const e = byModel[model] ?? {
+          inputTokens: 0, outputTokens: 0, cacheReadInputTokens: 0,
+          cacheCreationInputTokens: 0, costUSD: 0, webSearchRequests: 0,
+        }
+        e.inputTokens += u.inputTokens ?? 0
+        e.outputTokens += u.outputTokens ?? 0
+        e.cacheReadInputTokens += u.cacheReadInputTokens ?? 0
+        e.cacheCreationInputTokens += u.cacheCreationInputTokens ?? 0
+        byModel[model] = e
+      }
+    }
+  }
+  return byModel
+}
+
 function mergeModelUsage(
   fromStats: Record<string, ModelUsage>,
   fromSessions: Record<string, ModelUsage>,
@@ -122,7 +160,6 @@ export async function GET(request: NextRequest) {
       })
     : allSessions
 
-  const dailyFromSessions = computeDailyActivityFromSessions(sessions)
   const allDailyFromSessions = computeDailyActivityFromSessions(allSessions)
   const fullDailyActivity = stats
     ? mergeDailyActivity(stats.dailyActivity ?? [], allDailyFromSessions)
@@ -137,11 +174,15 @@ export async function GET(request: NextRequest) {
       })
     : fullDailyActivity
 
-  const sessionModelUsage = computeModelUsageFromSessions(sessions)
-  // When filtering by date, only use session-derived data to avoid all-time cache bleeding in
+  // When a date range is set, count tokens by the day they were SPENT (per-day
+  // buckets over ALL sessions) — not by which sessions started in the window — so
+  // a long session that began earlier still credits its in-range tokens. All-time
+  // needs no day-scoping, so it keeps the (cache-merged) full session usage.
+  const fromKey = dateFrom ? localDayKey(dateFrom) : null
+  const toKey = dateTo ? localDayKey(dateTo) : null
   const modelUsage = (dateFrom || dateTo)
-    ? sessionModelUsage
-    : mergeModelUsage(stats?.modelUsage ?? {}, sessionModelUsage)
+    ? rangeModelUsageFromDays(allSessions, fromKey, toKey)
+    : mergeModelUsage(stats?.modelUsage ?? {}, computeModelUsageFromSessions(allSessions))
 
   // Compute estimated total cost from modelUsage
   let totalCost = 0
@@ -173,6 +214,34 @@ export async function GET(request: NextRequest) {
       totalToolCalls += count
     }
   }
+
+  // Per-project tokens + cost SPENT in the range (all-time when unscoped), grouped
+  // by base project so worktree sessions roll into their parent. Range-aware via
+  // the same per-day buckets as the headline totals.
+  const projectAgg = new Map<string, { name: string; tokens: number; cost: number }>()
+  for (const s of allSessions) {
+    const byDay = s.usage_by_day
+    if (!byDay) continue
+    let tok = 0
+    let cost = 0
+    for (const [day, models] of Object.entries(byDay)) {
+      if (fromKey && day < fromKey) continue
+      if (toKey && day > toKey) continue
+      for (const [model, u] of Object.entries(models)) {
+        tok += (u.inputTokens ?? 0) + (u.outputTokens ?? 0)
+        cost += estimateTotalCostFromModel(model, u)
+      }
+    }
+    if (tok <= 0) continue
+    const name = projectDisplayName(s.project_path ?? '')
+    const e = projectAgg.get(name) ?? { name, tokens: 0, cost: 0 }
+    e.tokens += tok
+    e.cost += cost
+    projectAgg.set(name, e)
+  }
+  const projectBreakdown = Array.from(projectAgg.values())
+    .sort((a, b) => b.tokens - a.tokens)
+    .slice(0, 12)
 
   // Active days (days with at least 1 session)
   const activeDays = dailyActivity.filter(d => d.sessionCount > 0).length
@@ -231,6 +300,7 @@ export async function GET(request: NextRequest) {
       storageBytes,
       sessionCount: sessions.length,
       hourTokenCounts: computeHourTokenCounts(sessions),
+      projectBreakdown,
     },
   })
 }

@@ -180,6 +180,10 @@ export default function V2ProjectsPage() {
   })
   const { sessions: liveSessions } = useLive()
   const [query, setQuery] = React.useState('')
+  // Deprioritize the heavy filter→group→card re-render behind keystrokes: the
+  // input stays bound to `query` (responsive) while the memos read this deferred
+  // value, so typing never janks on a large project list.
+  const deferredQuery = React.useDeferredValue(query)
   const [sort, setSort] = React.useState<SortKey>('recent')
   const searchRef = React.useRef<HTMLInputElement>(null)
 
@@ -236,14 +240,14 @@ export default function V2ProjectsPage() {
 
   // Filter on folder name + last_prompt (case-insensitive).
   const filtered = React.useMemo(() => {
-    const q = query.trim().toLowerCase()
+    const q = deferredQuery.trim().toLowerCase()
     if (!q) return projects
     return projects.filter((p) => {
       const name = p.display_name?.toLowerCase() ?? ''
       const prompt = p.last_prompt?.toLowerCase() ?? ''
       return name.includes(q) || prompt.includes(q)
     })
-  }, [projects, query])
+  }, [projects, deferredQuery])
 
   // Summary strip totals (over the FILTERED set so the strip reflects the lens).
   const totals = React.useMemo(() => {

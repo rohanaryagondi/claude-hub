@@ -63,6 +63,9 @@ export interface SessionMeta {
   cache_creation_input_tokens?: number
   cache_read_input_tokens?: number
   first_prompt: string
+  /** A title the user explicitly set in Claude Code (`/title`). Wins over every
+   *  derived/auto-generated name. Absent when the user never set one. */
+  custom_title?: string
   user_interruptions: number
   user_response_times: number[]
   tool_errors: number
@@ -77,6 +80,9 @@ export interface SessionMeta {
   message_hours: number[]
   user_message_timestamps: string[]
   model_usage?: Record<string, ModelUsage>
+  /** Token usage bucketed by LOCAL calendar day (YYYY-MM-DD) → model, so "today"
+   *  reflects tokens spent today even in sessions that started on an earlier day. */
+  usage_by_day?: Record<string, Record<string, ModelUsage>>
 }
 
 // ─── Facets ──────────────────────────────────────────────────────────────────

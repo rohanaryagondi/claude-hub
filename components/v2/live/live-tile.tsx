@@ -49,6 +49,7 @@ export function LiveTile({ session, now, tickTokens, onOpen, onSplit, selected }
   const hue = projectColor(name)
   // Owner feedback #3: show the human session NAME, not just the folder.
   const title = sessionTitle({
+    custom_title: session.custom_title,
     first_prompt: session.first_prompt,
     session_id: session.session_id,
   })
@@ -249,7 +250,7 @@ export function LiveTile({ session, now, tickTokens, onOpen, onSplit, selected }
         <span
           className="inline-flex items-center gap-1 shrink-0"
           style={{ color: 'var(--v2-token)' }}
-          title="total tokens this session"
+          title={`${totalTok.toLocaleString()} tokens (input + output)`}
         >
           <Cpu size={11} />
           {fmtTokens(totalTok)}
@@ -259,7 +260,7 @@ export function LiveTile({ session, now, tickTokens, onOpen, onSplit, selected }
             {fmtTokens(Math.round(ratePerMin))}/m
           </span>
         )}
-        <span className="shrink-0" style={{ color: 'var(--v2-cost)' }} title="estimated cost">
+        <span className="shrink-0" style={{ color: 'var(--v2-cost)' }} title={`$${session.estimated_cost.toFixed(4)} estimated`}>
           {fmtCost(session.estimated_cost)}
         </span>
         <span className="ml-auto shrink-0" style={{ color: 'var(--v2-faint)' }} title="active elapsed">

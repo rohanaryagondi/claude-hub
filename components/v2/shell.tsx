@@ -34,6 +34,7 @@ import {
   Sun,
 } from 'lucide-react'
 import { useLive } from '@/components/layout/live-context'
+import { CommandPalette } from '@/components/v2/command-palette'
 
 /* ── Public prop API ─────────────────────────────────────────────────────────
    active  — id of the current top-level destination; one of:
@@ -344,6 +345,9 @@ export function V2Shell({ active, children, theme, onToggleTheme }: V2ShellProps
           </span>
         </span>
       </footer>
+
+      {/* ⌘K quick-switcher (the status bar advertises it on every route) */}
+      <CommandPalette />
     </div>
   )
 }
@@ -569,7 +573,7 @@ function StatusHints({ active }: { active: string }) {
     case 'ask':
       return <>{<Hint k="↵">send</Hint>}{<Hint k="/">search</Hint>}{palette}</>
     case 'stats':
-      return <>{<Hint k="7/30/90">range</Hint>}{palette}</>
+      return <>{<Hint k="1/7/30/all">range</Hint>}{palette}</>
     case 'desk':
       return <>{<Hint k="/">filter</Hint>}{palette}</>
     default:

@@ -174,17 +174,24 @@ export function prettyModel(id: string): string {
   if (m.includes('opus')) family = 'Opus'
   else if (m.includes('sonnet')) family = 'Sonnet'
   else if (m.includes('haiku')) family = 'Haiku'
-  // pull a major-minor like 4-7 / 4-5
-  const ver = m.match(/(\d+)-(\d+)/)
-  return ver ? `${family} ${ver[1]}.${ver[2]}` : family
+  else if (m.includes('fable')) family = 'Fable'
+  // pull a major-minor like 4-7 / 4-5, else a single version like fable-5. The
+  // minor is capped at 2 digits so a date suffix (…-5-20260101) can't be taken
+  // as the minor version.
+  const ver = m.match(/(\d+)-(\d{1,2})(?!\d)/)
+  if (ver) return `${family} ${ver[1]}.${ver[2]}`
+  const solo = m.match(/-(\d+)(?:-|$)/)
+  return solo ? `${family} ${solo[1]}` : family
 }
 
-/** Stable color per model family (Opus = accent, Sonnet = token, Haiku = live). */
+/** Stable color per model family (Opus = accent, Sonnet = token, Haiku = live,
+ *  Fable = ai/violet; unknown families fall back to faint, like synthetic). */
 export function modelColor(id: string, c: ChartColors): string {
   const m = (id || '').toLowerCase()
   if (m === '<synthetic>' || m.includes('synthetic')) return c.faint
   if (m.includes('opus')) return c.accent
   if (m.includes('sonnet')) return c.token
   if (m.includes('haiku')) return c.live
-  return c.ai
+  if (m.includes('fable')) return c.ai
+  return c.faint
 }

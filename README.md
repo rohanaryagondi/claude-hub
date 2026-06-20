@@ -21,8 +21,10 @@ It reads your Claude Code session logs straight from `~/.claude/` — **no cloud
 ```bash
 npm install
 npm run dev          # → http://localhost:3000  (Turbopack)
-# production:
-npm run build && npm run start
+
+# production (self-contained server):
+npm run build:dist   # next build + bundles static/public into .next/standalone
+node bin/cli.js      # the `claude-hub` launcher: starts the standalone server, opens the browser
 ```
 
 There's no first-run config — it discovers your sessions automatically. If `~/.claude/` is empty (you haven't run Claude Code yet), you get calm empty states, not errors.

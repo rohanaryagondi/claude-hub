@@ -32,6 +32,8 @@ export interface SessionRowData {
   tokens: number
   activeMinutes: number
   model: string | undefined
+  /** Coarse model family, for one-tap filtering. */
+  modelFamily: ModelFamily
   branch: string | undefined
   usesMcp: boolean
   usesTaskAgent: boolean
@@ -80,6 +82,16 @@ function recencyOf(lastActivity: string | undefined): StatusDotState {
   return 'idle'
 }
 
+export type ModelFamily = 'opus' | 'sonnet' | 'haiku' | 'fable' | 'other'
+const MODEL_FAMILIES: ModelFamily[] = ['opus', 'sonnet', 'haiku', 'fable']
+
+/** Coarse model family from a model id, for filtering (mirrors shortModel's logic). */
+export function modelFamilyOf(model: string | undefined): ModelFamily {
+  if (!model) return 'other'
+  const m = model.toLowerCase()
+  return MODEL_FAMILIES.find((f) => m.includes(f)) ?? 'other'
+}
+
 /** Pick the dominant model by token volume from model_usage, else undefined. */
 function dominantModel(s: SessionWithFacet): string | undefined {
   const usage = s.model_usage
@@ -101,6 +113,7 @@ export function toRowData(s: SessionWithFacet): SessionRowData {
   // Lead with a human session NAME (slug → first_prompt → id). The inferred
   // topic line is kept separately as secondary context + for full-text search.
   const title = sessionTitle({
+    custom_title: s.custom_title,
     slug_name: s.slug,
     first_prompt: s.first_prompt,
     session_id: s.session_id,
@@ -133,6 +146,7 @@ export function toRowData(s: SessionWithFacet): SessionRowData {
     tokens,
     activeMinutes: active,
     model: dominantModel(s),
+    modelFamily: modelFamilyOf(dominantModel(s)),
     branch,
     usesMcp: !!s.uses_mcp,
     usesTaskAgent: !!s.uses_task_agent,
@@ -146,13 +160,15 @@ export function toRowData(s: SessionWithFacet): SessionRowData {
   }
 }
 
-export type SortKey = 'recent' | 'cost' | 'tokens' | 'active'
+export type SortKey = 'recent' | 'cost' | 'tokens' | 'active' | 'errors' | 'oldest'
 
 export const SORT_LABELS: Record<SortKey, string> = {
   recent: 'newest',
   cost: 'cost',
   tokens: 'tokens',
   active: 'active time',
+  errors: 'errors',
+  oldest: 'oldest',
 }
 
 export function sortRows(rows: SessionRowData[], key: SortKey): SessionRowData[] {
@@ -166,6 +182,12 @@ export function sortRows(rows: SessionRowData[], key: SortKey): SessionRowData[]
       break
     case 'active':
       copy.sort((a, b) => b.activeMinutes - a.activeMinutes)
+      break
+    case 'errors':
+      copy.sort((a, b) => b.toolErrors - a.toolErrors)
+      break
+    case 'oldest':
+      copy.sort((a, b) => a.sortTime - b.sortTime)
       break
     case 'recent':
     default:

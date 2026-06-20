@@ -18,6 +18,7 @@ export type ProjectSession = SessionWithFacet
  */
 export function sessionTitleOf(s: ProjectSession): string {
   return sessionTitle({
+    custom_title: s.custom_title,
     slug_name: s.slug,
     first_prompt: s.first_prompt,
     session_id: s.session_id,

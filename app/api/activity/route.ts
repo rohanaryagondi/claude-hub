@@ -1,5 +1,6 @@
 import { NextResponse } from 'next/server'
 import { getSessions, readStatsCache } from '@/lib/claude-reader'
+import { localDayKey } from '@/lib/decode'
 import type { DailyActivity, SessionMeta } from '@/types/claude'
 
 export const dynamic = 'force-dynamic'
@@ -22,11 +23,12 @@ function computeStreaks(dates: Set<string>): { current: number; longest: number 
     }
   }
 
-  // Current streak (from today backwards)
-  const today = new Date().toISOString().slice(0, 10)
+  // Current streak (from today backwards, in the user's LOCAL day). Walk a live
+  // Date so getDate()-decrement stays in local time; matches the local-day keys
+  // in `dates`.
   let current = 0
-  const d = new Date(today)
-  while (dates.has(d.toISOString().slice(0, 10))) {
+  const d = new Date()
+  while (dates.has(localDayKey(d))) {
     current++
     d.setDate(d.getDate() - 1)
   }
@@ -37,19 +39,28 @@ function computeStreaks(dates: Set<string>): { current: number; longest: number 
 function computeDailyActivityFromSessions(sessions: SessionMeta[]): DailyActivity[] {
   const byDate = new Map<string, { messages: number; sessions: number; tools: number; tokens: number }>()
 
+  const bucket = (date: string) =>
+    byDate.get(date) ?? byDate.set(date, { messages: 0, sessions: 0, tools: 0, tokens: 0 }).get(date)!
+
   for (const s of sessions) {
     if (!s.start_time) continue
-    const date = s.start_time.slice(0, 10)
-    if (!/^\d{4}-\d{2}-\d{2}$/.test(date)) continue
+    const sd = new Date(s.start_time)
+    if (Number.isNaN(sd.getTime())) continue
 
-    const existing = byDate.get(date) ?? { messages: 0, sessions: 0, tools: 0, tokens: 0 }
-    existing.messages += (s.user_message_count ?? 0) + (s.assistant_message_count ?? 0)
-    existing.sessions += 1
-    existing.tools += Object.values(s.tool_counts ?? {}).reduce((sum, count) => sum + count, 0)
-    for (const usage of Object.values(s.model_usage ?? {})) {
-      existing.tokens += (usage.inputTokens ?? 0) + (usage.outputTokens ?? 0)
+    // Session-level counts credit the start day; TOKENS credit the day they were
+    // actually spent (a session spanning days no longer dumps all tokens on day 1).
+    const startDay = localDayKey(sd)
+    const e = bucket(startDay)
+    e.messages += (s.user_message_count ?? 0) + (s.assistant_message_count ?? 0)
+    e.sessions += 1
+    e.tools += Object.values(s.tool_counts ?? {}).reduce((sum, count) => sum + count, 0)
+
+    for (const [day, byModel] of Object.entries(s.usage_by_day ?? {})) {
+      const d = bucket(day)
+      for (const usage of Object.values(byModel)) {
+        d.tokens += (usage.inputTokens ?? 0) + (usage.outputTokens ?? 0)
+      }
     }
-    byDate.set(date, existing)
   }
 
   return Array.from(byDate.entries())
@@ -102,7 +113,11 @@ export async function GET() {
     const d = new Date(s.start_time)
     if (isNaN(d.getTime())) continue
     dowCounts[d.getDay()]++
-    activeDates.add(s.start_time.slice(0, 10))
+    // Active days = days with actual token activity (matches the cockpit streak),
+    // so a multi-day session counts every day it ran, not just its start day.
+    const byDay = s.usage_by_day
+    if (byDay) for (const day of Object.keys(byDay)) activeDates.add(day)
+    else activeDates.add(localDayKey(d))
   }
 
   const streaks = computeStreaks(activeDates)

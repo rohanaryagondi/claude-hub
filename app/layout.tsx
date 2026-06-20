@@ -10,6 +10,7 @@ import '@/components/v2/ui/v2-tokens.css'
 import { ThemeProvider } from '@/components/theme-provider'
 import { LiveProvider } from '@/components/layout/live-context'
 import { MemoryRefresher } from '@/components/v2/memory-refresher'
+import { RoutePrewarm } from '@/components/v2/route-prewarm'
 
 const geistMono = Geist_Mono({
   variable: '--font-geist-mono',
@@ -43,6 +44,7 @@ export default function RootLayout({
               kicks a background incremental memory build if the store is >24h
               stale. Non-blocking, runs once per page load. */}
           <MemoryRefresher />
+          <RoutePrewarm />
           <LiveProvider>{children}</LiveProvider>
         </ThemeProvider>
       </body>

@@ -20,6 +20,32 @@ export const dynamic = 'force-dynamic'
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 type AnyLine = Record<string, any>
 
+/* ── AI-summary throttle ──────────────────────────────────────────────────────
+   The deterministic fields (since_count, tool_tally, awaiting_user) are cheap and
+   recomputed on every request, so the "waiting on you" signal stays responsive.
+   The AI prose `summary` spawns the `claude` CLI (~7–11s) and is the real cost —
+   re-running it on every transcript write of an actively-working session is what
+   drained subscription usage. So per session we compute it at most once per
+   SUMMARY_TTL_MS, with an immediate refresh when the user's turn changes or Claude
+   just stopped, and we coalesce concurrent requests into a single spawn.
+   Module-scoped maps persist for the server's lifetime (reset on dev HMR). */
+const SUMMARY_TTL_MS = 60_000
+
+interface SummaryCacheEntry {
+  ts: number
+  summary: string
+  awaitingUser: boolean
+  lastUserIdx: number
+}
+const summaryCache = new Map<string, SummaryCacheEntry>()
+const inFlightSummary = new Map<string, Promise<string>>()
+
+function pruneSummaryCache(): void {
+  if (summaryCache.size <= 64) return
+  const cutoff = Date.now() - 30 * 60_000
+  for (const [k, v] of summaryCache) if (v.ts < cutoff) summaryCache.delete(k)
+}
+
 // Notification / system text that masquerades as a user message but isn't
 // something the owner actually typed. We skip these when hunting for the last
 // genuine user turn.
@@ -193,26 +219,43 @@ export async function GET(
     })
   }
 
-  // Ask the local claude CLI for a concrete summary. If the CLI is unavailable
-  // (or errors), return summary:'' so the client falls back to its own
-  // deterministic line built from the fields below.
+  // Reuse a recent AI summary when one exists, the turn hasn't changed, Claude
+  // hasn't just stopped, and we're inside the TTL — otherwise (re)compute it via
+  // the local claude CLI, coalescing concurrent requests for this session into a
+  // single spawn. On CLI failure the promise resolves to '' so the client falls
+  // back to its deterministic line.
+  const now = Date.now()
+  const cached = summaryCache.get(id)
+  const turnChanged = !cached || cached.lastUserIdx !== lastUserIdx
+  const justStopped = !!cached && awaitingUser && !cached.awaitingUser
+  const ttlValid = !!cached && now - cached.ts < SUMMARY_TTL_MS
+
   let summary = ''
-  try {
-    const { text } = await askClaudeStream(
-      {
-        prompt: buildPrompt({
-          lastUserText: lastUserText.slice(0, 300),
-          assistantExcerpts,
-          toolTally,
-          awaitingUser,
-        }),
-        system: SYSTEM_PROMPT,
-      },
-      () => { /* one-shot: we don't stream this, just collect the full text */ },
-    )
-    summary = text.replace(/\s+/g, ' ').trim()
-  } catch {
-    summary = ''
+  if (cached && ttlValid && !turnChanged && !justStopped) {
+    summary = cached.summary
+  } else {
+    let pending = inFlightSummary.get(id)
+    if (!pending) {
+      pending = askClaudeStream(
+        {
+          prompt: buildPrompt({
+            lastUserText: lastUserText.slice(0, 300),
+            assistantExcerpts,
+            toolTally,
+            awaitingUser,
+          }),
+          system: SYSTEM_PROMPT,
+        },
+        () => { /* one-shot: we don't stream this, just collect the full text */ },
+      )
+        .then(({ text }) => text.replace(/\s+/g, ' ').trim())
+        .catch(() => '')
+        .finally(() => { inFlightSummary.delete(id) })
+      inFlightSummary.set(id, pending)
+    }
+    summary = await pending
+    summaryCache.set(id, { ts: Date.now(), summary, awaitingUser, lastUserIdx })
+    pruneSummaryCache()
   }
 
   return NextResponse.json({

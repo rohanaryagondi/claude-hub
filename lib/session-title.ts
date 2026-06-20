@@ -6,6 +6,8 @@
 // short id-based fallback.
 
 interface TitleSource {
+  /** A title the user explicitly set in Claude Code (`/title`) — always wins. */
+  custom_title?: string
   slug_name?: string
   first_prompt?: string
   session_id: string
@@ -150,12 +152,17 @@ function deriveFromFirstPrompt(firstPrompt: string): string {
 
 /**
  * A human session NAME, in priority order:
- *  (a) prettified `slug_name` if present
- *  (b) a concise title derived from `first_prompt`
- *  (c) 'Session ' + first 8 chars of the id
+ *  (a) the user-set `custom_title` (`/title`) — verbatim, never overridden
+ *  (b) prettified `slug_name` if present
+ *  (c) a concise title derived from `first_prompt`
+ *  (d) 'Session ' + first 8 chars of the id
  * Never returns an empty string.
  */
 export function sessionTitle(s: TitleSource): string {
+  if (s.custom_title && s.custom_title.trim()) {
+    return s.custom_title.trim()
+  }
+
   if (s.slug_name && s.slug_name.trim()) {
     const pretty = titleCaseSlug(s.slug_name)
     if (pretty) return pretty

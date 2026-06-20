@@ -61,11 +61,14 @@ function fmtRelative(iso: string | undefined): string {
 function shortModel(model: string | undefined): string | null {
   if (!model) return null
   const m = model.toLowerCase()
-  const fam = ['opus', 'sonnet', 'haiku'].find((f) => m.includes(f))
+  const fam = ['opus', 'sonnet', 'haiku', 'fable'].find((f) => m.includes(f))
   if (!fam) return model.replace(/^claude-?/, '').slice(0, 12) || null
-  // pull a trailing version like 4-8 / 4-5 / 3-5
-  const ver = m.match(/(\d+[-.]\d+)/)
-  return ver ? `${fam}-${ver[1].replace('.', '-')}` : fam
+  // pull a trailing version like 4-8 / 4-5 / 3-5, else a single version like
+  // fable-5. Minor capped at 2 digits so a date suffix isn't taken as the minor.
+  const ver = m.match(/(\d+[-.]\d{1,2})(?!\d)/)
+  if (ver) return `${fam}-${ver[1].replace('.', '-')}`
+  const solo = m.match(/-(\d+)(?:-|$)/)
+  return solo ? `${fam}-${solo[1]}` : fam
 }
 
 export function SessionRow({ row, selected = false, onActivate }: SessionRowProps) {

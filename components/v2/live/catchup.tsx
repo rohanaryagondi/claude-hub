@@ -92,11 +92,18 @@ export function deterministicSummary(d: CatchupAiData): string {
   return [evt, tools, status].filter(Boolean).join(' · ')
 }
 
+/* Minimum spacing between catch-up fetches for a session. An actively-writing
+   session advances mtime every few seconds, but the summary only needs periodic
+   refreshing — and the server throttles the expensive AI prose anyway, so this
+   just trims redundant request/file-read churn. Per-session last-fetch clock. */
+const FETCH_THROTTLE_MS = 15_000
+const lastFetchAt = new Map<string, number>()
+
 /**
- * useCatchup — fetch the server-side catch-up lazily; refetch only when the
- * tile's mtime advances (new activity). Returns null until the first payload
- * lands (or when the endpoint failed and nothing is cached) — callers render
- * their own fallback in that case.
+ * useCatchup — fetch the server-side catch-up lazily; refetch when the tile's
+ * mtime advances (new activity), throttled to at most once per FETCH_THROTTLE_MS
+ * per session. Returns null until the first payload lands (or when the endpoint
+ * failed and nothing is cached) — callers render their own fallback in that case.
  */
 export function useCatchup(sessionId: string, mtimeMs: number): CatchupAiData | null {
   const [data, setData] = React.useState<CatchupAiData | null>(
@@ -113,18 +120,35 @@ export function useCatchup(sessionId: string, mtimeMs: number): CatchupAiData | 
     }
 
     let cancelled = false
-    fetch(`/api/sessions/${sessionId}/catchup-ai`)
-      .then((r) => (r.ok ? r.json() : Promise.reject(new Error(String(r.status)))))
-      .then((d: CatchupAiData) => {
-        if (cancelled) return
-        setData(d)
-        CACHE.set(sessionId, { stamp: mtimeMs, data: d })
-      })
-      .catch(() => {
-        /* keep any cached data; callers fall back when null */
-      })
+    let timer: ReturnType<typeof setTimeout> | undefined
+
+    const run = () => {
+      lastFetchAt.set(sessionId, Date.now())
+      fetch(`/api/sessions/${sessionId}/catchup-ai`)
+        .then((r) => (r.ok ? r.json() : Promise.reject(new Error(String(r.status)))))
+        .then((d: CatchupAiData) => {
+          if (cancelled) return
+          setData(d)
+          CACHE.set(sessionId, { stamp: mtimeMs, data: d })
+        })
+        .catch(() => {
+          /* keep any cached data; callers fall back when null */
+        })
+    }
+
+    // Fetch immediately on first appearance or once the window has elapsed;
+    // otherwise DEFER to the window's end so we still capture the session's
+    // latest state (e.g. the moment Claude stops) without a request per write.
+    const sinceLast = Date.now() - (lastFetchAt.get(sessionId) ?? 0)
+    if (!cached || sinceLast >= FETCH_THROTTLE_MS) {
+      run()
+    } else {
+      timer = setTimeout(run, FETCH_THROTTLE_MS - sinceLast)
+    }
+
     return () => {
       cancelled = true
+      if (timer) clearTimeout(timer)
     }
   }, [sessionId, mtimeMs])
 

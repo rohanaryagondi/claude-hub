@@ -18,7 +18,7 @@ import { useEffect, useMemo, useRef, useState, useCallback, type ReactNode } fro
 import useSWR from 'swr'
 import { useRouter } from 'next/navigation'
 import { V2Shell } from '@/components/v2/shell'
-import { SearchInput, SkeletonRow, Pill } from '@/components/v2/ui'
+import { SearchInput, SkeletonRow, Pill, Kbd } from '@/components/v2/ui'
 import { SessionRow } from '@/components/v2/session-row'
 import { SortControl } from '@/components/v2/sort-control'
 import {
@@ -27,12 +27,15 @@ import {
   SORT_LABELS,
   type SortKey,
   type SessionRowData,
+  type ModelFamily,
 } from '@/components/v2/session-data'
 import type { SessionWithFacet } from '@/types/claude'
+import { formatActive } from '@/lib/active-time'
 
 const fetcher = (u: string) => fetch(u).then((r) => r.json())
 
-const SORT_ORDER: SortKey[] = ['recent', 'cost', 'tokens', 'active']
+const SORT_ORDER: SortKey[] = ['recent', 'cost', 'tokens', 'active', 'errors', 'oldest']
+const FAMILY_ORDER: ModelFamily[] = ['opus', 'sonnet', 'haiku', 'fable', 'other']
 const SORT_OPTIONS = SORT_ORDER.map((k) => ({ key: k, label: SORT_LABELS[k] }))
 
 function fmtCost(n: number): string {
@@ -47,14 +50,6 @@ function fmtTokens(n: number): string {
   if (n >= 1_000) return `${(n / 1_000).toFixed(1)}k`
   return `${Math.round(n)}`
 }
-function fmtActive(min: number): string {
-  if (!min || min < 1) return '0m'
-  if (min < 60) return `${Math.round(min)}m`
-  const h = min / 60
-  if (h < 24) return `${h.toFixed(h < 10 ? 1 : 0)}h`
-  return `${Math.round(h / 24)}d`
-}
-
 export default function V2SessionsPage() {
   const { data, error, isLoading } = useSWR<{ sessions: SessionWithFacet[] }>(
     '/api/sessions',
@@ -65,6 +60,7 @@ export default function V2SessionsPage() {
 
   const [query, setQuery] = useState('')
   const [sort, setSort] = useState<SortKey>('recent')
+  const [families, setFamilies] = useState<Set<ModelFamily>>(new Set())
   const [rawCursor, setRawCursor] = useState(0)
 
   const inputRef = useRef<HTMLInputElement>(null)
@@ -76,14 +72,21 @@ export default function V2SessionsPage() {
     [data]
   )
 
-  // Filter (substring over the precomputed haystack) → sort.
+  // Model families actually present, in canonical order — drives the filter chips.
+  const availableFamilies = useMemo(() => {
+    const present = new Set(allRows.map((r) => r.modelFamily))
+    return FAMILY_ORDER.filter((f) => present.has(f))
+  }, [allRows])
+
+  // Filter (model-family chips + substring over the precomputed haystack) → sort.
   const rows = useMemo(() => {
     const q = query.trim().toLowerCase()
-    const filtered = q
+    let filtered = q
       ? allRows.filter((r) => q.split(/\s+/).every((tok) => r.haystack.includes(tok)))
       : allRows
+    if (families.size > 0) filtered = filtered.filter((r) => families.has(r.modelFamily))
     return sortRows(filtered, sort)
-  }, [allRows, query, sort])
+  }, [allRows, query, sort, families])
 
   // Keep the cursor in bounds by deriving it during render (rather than syncing
   // via an effect) so a shrinking result set can never leave it out of range.
@@ -238,6 +241,60 @@ export default function V2SessionsPage() {
             autoFocus
           />
 
+          {/* Model-family filter chips — only shown when >1 family is present.
+              Empty selection = all; toggling narrows the list by dominant model. */}
+          {availableFamilies.length > 1 && (
+            <div className="mt-[var(--v2-s2)] flex flex-wrap items-center gap-[var(--v2-s2)]">
+              {availableFamilies.map((f) => {
+                const on = families.has(f)
+                return (
+                  <button
+                    key={f}
+                    type="button"
+                    aria-pressed={on}
+                    onClick={() => {
+                      setFamilies((prev) => {
+                        const next = new Set(prev)
+                        if (next.has(f)) next.delete(f)
+                        else next.add(f)
+                        return next
+                      })
+                      setRawCursor(0)
+                    }}
+                    className="v2-mono transition-colors"
+                    style={{
+                      fontSize: 'var(--v2-text-micro)',
+                      padding: '2px 8px',
+                      borderRadius: 'var(--v2-radius-sm)',
+                      border: `1px solid ${on ? 'var(--v2-accent)' : 'var(--v2-border)'}`,
+                      background: on ? 'var(--v2-surface-2)' : 'transparent',
+                      color: on ? 'var(--v2-text)' : 'var(--v2-muted)',
+                      cursor: 'pointer',
+                    }}
+                  >
+                    {f}
+                  </button>
+                )
+              })}
+              {families.size > 0 && (
+                <button
+                  type="button"
+                  onClick={() => { setFamilies(new Set()); setRawCursor(0) }}
+                  className="v2-mono"
+                  style={{
+                    fontSize: 'var(--v2-text-micro)',
+                    color: 'var(--v2-faint)',
+                    background: 'transparent',
+                    border: 'none',
+                    cursor: 'pointer',
+                  }}
+                >
+                  clear
+                </button>
+              )}
+            </div>
+          )}
+
           {/* Aggregate band over the current result set — fills the wide header */}
           {!isLoading && rows.length > 0 && (
             <div
@@ -247,7 +304,7 @@ export default function V2SessionsPage() {
               <BandStat label={query ? 'in view' : 'sessions'} value={`${rows.length}`} />
               <BandStat label="cost" value={fmtCost(agg.cost)} tone="cost" />
               <BandStat label="tokens" value={fmtTokens(agg.tokens)} tone="token" />
-              <BandStat label="active" value={fmtActive(agg.active)} />
+              <BandStat label="active" value={formatActive(agg.active)} />
               {agg.topName && (
                 <BandStat
                   label="top spend"
@@ -297,16 +354,25 @@ export default function V2SessionsPage() {
                 </div>
               ))}
               <div
-                className="v2-mono"
+                className="v2-mono flex flex-wrap items-center justify-center gap-x-[var(--v2-s3)] gap-y-1"
                 style={{
                   padding: 'var(--v2-s4) var(--v2-s5)',
                   fontSize: 'var(--v2-text-label)',
                   color: 'var(--v2-faint)',
-                  textAlign: 'center',
                 }}
               >
-                {rows.length} session{rows.length === 1 ? '' : 's'} · sorted by{' '}
-                {SORT_LABELS[sort]}
+                <span>
+                  {rows.length} session{rows.length === 1 ? '' : 's'} · sorted by{' '}
+                  {SORT_LABELS[sort]}
+                </span>
+                {/* Keyboard legend — these bindings are wired above but otherwise invisible. */}
+                <span className="hidden items-center gap-[var(--v2-s2)] sm:inline-flex">
+                  <span style={{ color: 'var(--v2-border)' }}>·</span>
+                  <Kbd>/</Kbd> filter
+                  <Kbd>j/k</Kbd> move
+                  <Kbd>↵</Kbd> open
+                  <Kbd>g/G</Kbd> jump
+                </span>
               </div>
             </div>
           )}

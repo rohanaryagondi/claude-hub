@@ -4,8 +4,8 @@
    /stats — INSTRUMENTS (FLIGHTDECK §6, priority #3: overall Claude stats).
 
    "How am I using Claude" overview as a fixed gauge cluster, NOT free-floating
-   KPI cards (§7.6). A scope selector (7/30/90-day range) drives the whole
-   cluster — the §7.5 "scope follows the lens" idea at the time-range altitude.
+   KPI cards (§7.6). A scope selector (1-day / 7 / 30 / All-time range) drives the
+   whole cluster — the §7.5 "scope follows the lens" idea at the time-range altitude.
 
    Data:
      /api/stats?from=MM/DD/YYYY&to=MM/DD/YYYY  → headline KPIs, model mix,
@@ -19,12 +19,10 @@
 
 import * as React from 'react'
 import useSWR from 'swr'
-import { Gauge as GaugeIcon } from 'lucide-react'
 import { V2Shell } from '@/components/v2/shell'
 import {
   Panel,
   Section,
-  StatTile,
   SkeletonRow,
   Pill,
 } from '@/components/v2/ui'
@@ -36,12 +34,14 @@ import {
 import {
   UsageOverTime,
   ModelMix,
+  ProjectBreakdown,
   PeakHours,
   ToolLoad,
   DayOfWeek,
   ActivityHeatmap,
   type UsagePoint,
   type ModelSlice,
+  type ProjectStat,
   type HourPoint,
   type ToolLoadRow,
   type DowRow,
@@ -52,11 +52,12 @@ import { fmtTokens, fmtCost, fmtInt } from '@/components/v2/chart-theme'
 const fetcher = (u: string) => fetch(u).then((r) => r.json())
 
 /* ── range presets ─────────────────────────────────────────────────────────── */
-type RangeKey = '7' | '30' | '90'
+type RangeKey = '1' | '7' | '30' | 'all'
 const RANGES: { key: RangeKey; label: string; days: number }[] = [
+  { key: '1', label: '1D', days: 1 },
   { key: '7', label: '7D', days: 7 },
   { key: '30', label: '30D', days: 30 },
-  { key: '90', label: '90D', days: 90 },
+  { key: 'all', label: 'All', days: 0 }, // 0 = all time (no date filter)
 ]
 
 function mmddyyyy(d: Date): string {
@@ -91,6 +92,7 @@ interface StatsResponse {
     activeDays?: number
     totalCacheSavings?: number
     totalCacheReadTokens?: number
+    projectBreakdown?: ProjectStat[]
   }
 }
 interface ActivityResponse {
@@ -103,7 +105,11 @@ interface ActivityResponse {
   total_active_days?: number
 }
 interface ProjectsResponse {
-  projects: { tool_counts?: Record<string, number> }[]
+  // /api/projects is now used only for the all-time per-tool breakdown (TOOL LOAD);
+  // per-project tokens/cost moved to the range-scoped /api/stats `projectBreakdown`.
+  projects: {
+    tool_counts?: Record<string, number>
+  }[]
 }
 
 export default function V2StatsPage() {
@@ -111,16 +117,19 @@ export default function V2StatsPage() {
 
   const { from, to, days } = React.useMemo(() => {
     const preset = RANGES.find((r) => r.key === range)!
+    if (range === 'all') return { from: '', to: '', days: 0 } // no date filter → all-time
     const toD = new Date()
     const fromD = new Date()
     fromD.setDate(toD.getDate() - (preset.days - 1))
     return { from: mmddyyyy(fromD), to: mmddyyyy(toD), days: preset.days }
   }, [range])
 
-  const stats = useSWR<StatsResponse>(`/api/stats?from=${from}&to=${to}`, fetcher, {
-    revalidateOnFocus: false,
-    keepPreviousData: true,
-  })
+  // "All" omits from/to so /api/stats returns the all-time aggregate.
+  const stats = useSWR<StatsResponse>(
+    range === 'all' ? '/api/stats' : `/api/stats?from=${from}&to=${to}`,
+    fetcher,
+    { revalidateOnFocus: false, keepPreviousData: true },
+  )
   const activity = useSWR<ActivityResponse>('/api/activity', fetcher, {
     revalidateOnFocus: false,
   })
@@ -160,12 +169,6 @@ export default function V2StatsPage() {
     }
   }, [c, s])
 
-  // throughput sparkline for the headline tile (per-day i/o token volume)
-  const tokenSpark = React.useMemo(
-    () => (s ? s.dailyActivity.map((d) => d.tokenCount ?? 0) : []),
-    [s],
-  )
-
   /* ── usage over time (tokens i/o per day) ────────────────────────────────── */
   const usage: UsagePoint[] = React.useMemo(() => {
     if (!s) return []
@@ -203,6 +206,12 @@ export default function V2StatsPage() {
     }))
   }, [projects.data])
 
+  /* ── tokens + cost per project (RANGE-SCOPED, from /api/stats computed) ───── */
+  const projectTotals: ProjectStat[] = React.useMemo(
+    () => (c?.projectBreakdown ?? []).filter((p) => p.tokens > 0),
+    [c],
+  )
+
   /* ── peak hours by tokens (from /api/activity hour_counts = tokens) ──────── */
   const hours: HourPoint[] = React.useMemo(() => {
     const hc = activity.data?.hour_counts ?? []
@@ -226,10 +235,13 @@ export default function V2StatsPage() {
     return `${mo} ${Number(dd)}`
   }
 
+  const scopeLabel = range === 'all' ? 'all time' : `${monthLabel(from)}–${monthLabel(to)}`
   const dek =
     kpi && !loading
-      ? `${fmtInt(kpi.sessions)} sessions · ${fmtInt(kpi.tokens)} tokens · ${monthLabel(from)}–${monthLabel(to)}`
-      : `loading instruments · last ${days} days`
+      ? `${fmtInt(kpi.sessions)} sessions · ${fmtInt(kpi.tokens)} tokens · ${scopeLabel}`
+      : range === 'all'
+        ? 'loading instruments · all time'
+        : `loading instruments · last ${days} days`
 
   return (
     <V2Shell active="stats">
@@ -242,66 +254,37 @@ export default function V2StatsPage() {
           actions={<RangeSelector range={range} onChange={setRange} />}
         />
 
-        {/* ── lead KPI readout band — distributed across the FULL width ─────── */}
-        <Panel eyebrow="READOUT" title="Headline" headerRight={<ScopeChip days={days} />}>
-          {loading ? (
-            <KpiSkeleton />
-          ) : (
-            <div
-              className="grid gap-x-5 gap-y-4"
-              style={{ gridTemplateColumns: 'repeat(auto-fit, minmax(132px, 1fr))' }}
-            >
-              <StatTile
-                size="lead"
-                label="Sessions"
-                value={fmtInt(kpi?.sessions ?? 0)}
-                sub={`${fmtInt(kpi?.activeDays ?? 0)} active days`}
-              />
-              <StatTile
-                size="lead"
-                label="Messages"
-                value={fmtInt(kpi?.messages ?? 0)}
-                sub={`${fmtInt(kpi?.toolCalls ?? 0)} tool calls`}
-              />
-              <StatTile
-                size="lead"
-                label="Tokens (i/o)"
-                value={fmtTokens(kpi?.tokens ?? 0)}
-                tone="token"
-                sub="input + output"
-                spark={tokenSpark.length > 1 ? tokenSpark : undefined}
-                sparkProps={{ tone: 'token', height: 20 }}
-              />
-              <StatTile
-                size="lead"
-                label="Est. cost"
-                value={fmtCost(kpi?.cost ?? 0)}
-                tone="cost"
-                sub={`over ${days} days`}
-              />
-              <StatTile
-                size="lead"
-                label="Cache saved"
-                value={fmtCost(kpi?.cacheSaved ?? 0)}
-                tone="default"
-                sub={`${Math.round((kpi?.cacheHit ?? 0) * 100)}% cache hit`}
-              />
-              <StatTile
-                size="lead"
-                label="Tokens / day"
-                value={fmtTokens(kpi?.tokensPerDay ?? 0)}
-                sub="active-day avg"
-              />
-              <StatTile
-                size="lead"
-                label="Tools / session"
-                value={(kpi?.toolsPerSession ?? 0).toFixed(1)}
-                tone="accent"
-                sub={`${fmtInt(kpi?.toolCalls ?? 0)} calls`}
-              />
-            </div>
-          )}
-        </Panel>
+        {/* ── lead KPI readout — folded into one slim band (label·value·sub) ─── */}
+        <KpiStrip
+          loading={loading}
+          items={
+            kpi
+              ? [
+                  { label: 'Sessions', value: fmtInt(kpi.sessions), sub: `${fmtInt(kpi.activeDays)} active days` },
+                  { label: 'Messages', value: fmtInt(kpi.messages), sub: `${fmtInt(kpi.toolCalls)} tool calls` },
+                  { label: 'Tokens (i/o)', value: fmtTokens(kpi.tokens), tone: 'token', sub: 'input + output' },
+                  {
+                    label: 'Est. cost',
+                    value: fmtCost(kpi.cost),
+                    tone: 'cost',
+                    sub: range === 'all' ? 'all time' : `over ${days}d`,
+                  },
+                  {
+                    label: 'Cache saved',
+                    value: fmtCost(kpi.cacheSaved),
+                    sub: `${Math.round(kpi.cacheHit * 100)}% hit`,
+                  },
+                  { label: 'Tokens / day', value: fmtTokens(kpi.tokensPerDay), sub: 'active-day avg' },
+                  {
+                    label: 'Tools / session',
+                    value: kpi.toolsPerSession.toFixed(1),
+                    tone: 'accent',
+                    sub: `${fmtInt(kpi.toolCalls)} calls`,
+                  },
+                ]
+              : []
+          }
+        />
 
         {/* ── throughput (wide) + model mix (compact, beside it) ────────────── */}
         <div
@@ -317,7 +300,7 @@ export default function V2StatsPage() {
           </Panel>
         </div>
 
-        {/* ── peak hours + tool load + rhythm — dense 3-up filling the width ── */}
+        {/* ── peak hours + by-project + rhythm — dense 3-up filling the width ── */}
         <div
           className="grid gap-4"
           style={{ gridTemplateColumns: 'repeat(auto-fit, minmax(300px, 1fr))' }}
@@ -331,19 +314,11 @@ export default function V2StatsPage() {
           </Panel>
 
           <Panel
-            eyebrow="TOOL LOAD"
-            title="What Claude runs"
-            headerRight={<MonoNote>calls by category</MonoNote>}
+            eyebrow="BY PROJECT"
+            title="Tokens & cost"
+            headerRight={<MonoNote>{scopeLabel} · top 7</MonoNote>}
           >
-            {projects.isLoading && !projects.data ? (
-              <ChartSkeleton height={140} />
-            ) : toolLoad.length ? (
-              <ToolLoad data={toolLoad} />
-            ) : (
-              <FallbackNote>
-                tool breakdown unavailable · {fmtInt(kpi?.toolCalls ?? 0)} calls this range
-              </FallbackNote>
-            )}
+            {loading ? <ChartSkeleton height={156} /> : <ProjectBreakdown data={projectTotals} />}
           </Panel>
 
           <Panel eyebrow="RHYTHM" title="Day of week" headerRight={<MonoNote>sessions / weekday</MonoNote>}>
@@ -351,26 +326,47 @@ export default function V2StatsPage() {
           </Panel>
         </div>
 
-        {/* ── activity heatmap (full width, all-time) ───────────────────────── */}
-        <Panel
-          eyebrow="CALENDAR"
-          title="Activity heatmap"
-          headerRight={
-            activity.data ? (
-              <div className="flex items-center gap-2">
-                <Pill variant="live" dot>
-                  {activity.data.streaks?.current ?? 0}d streak
-                </Pill>
-                <MonoNote>
-                  peak {monthLabel(toMMDD(activity.data.most_active_day))} ·{' '}
-                  {fmtTokens(activity.data.most_active_day_tokens ?? 0)}
-                </MonoNote>
-              </div>
-            ) : null
-          }
+        {/* ── activity heatmap (bigger, fills) + tool load to its right ──────── */}
+        <div
+          className="grid gap-4"
+          style={{ gridTemplateColumns: 'minmax(0, 2.1fr) minmax(280px, 1fr)' }}
         >
-          {activity.isLoading && !activity.data ? <ChartSkeleton height={120} /> : <ActivityHeatmap data={heat} />}
-        </Panel>
+          <Panel
+            eyebrow="CALENDAR"
+            title="Activity heatmap"
+            headerRight={
+              activity.data ? (
+                <div className="flex items-center gap-2">
+                  <Pill variant="live" dot>
+                    {activity.data.streaks?.current ?? 0}d streak
+                  </Pill>
+                  <MonoNote>
+                    peak {monthLabel(toMMDD(activity.data.most_active_day))} ·{' '}
+                    {fmtTokens(activity.data.most_active_day_tokens ?? 0)}
+                  </MonoNote>
+                </div>
+              ) : null
+            }
+          >
+            {activity.isLoading && !activity.data ? <ChartSkeleton height={160} /> : <ActivityHeatmap data={heat} />}
+          </Panel>
+
+          <Panel
+            eyebrow="TOOL LOAD"
+            title="What Claude runs"
+            headerRight={<MonoNote>all-time</MonoNote>}
+          >
+            {projects.isLoading && !projects.data ? (
+              <ChartSkeleton height={160} />
+            ) : toolLoad.length ? (
+              <ToolLoad data={toolLoad} />
+            ) : (
+              <FallbackNote>
+                tool breakdown unavailable · {fmtInt(kpi?.toolCalls ?? 0)} calls
+              </FallbackNote>
+            )}
+          </Panel>
+        </div>
       </div>
     </V2Shell>
   )
@@ -432,22 +428,6 @@ function RangeSelector({ range, onChange }: { range: RangeKey; onChange: (r: Ran
   )
 }
 
-function ScopeChip({ days }: { days: number }) {
-  return (
-    <span
-      className="inline-flex items-center gap-1.5"
-      style={{
-        fontFamily: 'var(--v2-font-mono)',
-        fontSize: 'var(--v2-text-micro)',
-        color: 'var(--v2-faint)',
-      }}
-    >
-      <GaugeIcon size={12} style={{ color: 'var(--v2-accent)' }} />
-      scoped: last {days}d
-    </span>
-  )
-}
-
 function MonoNote({ children }: { children: React.ReactNode }) {
   return (
     <span
@@ -478,16 +458,90 @@ function FallbackNote({ children }: { children: React.ReactNode }) {
   )
 }
 
-function KpiSkeleton() {
+/* ── KPI strip — the headline readout folded into one slim horizontal band.
+   Each metric is a label·value·sub cell separated by hairline dividers, so the
+   seven KPIs occupy ~one line instead of a tall tile grid. ─────────────────── */
+type KpiTone = 'default' | 'token' | 'cost' | 'accent'
+const KPI_TONE: Record<KpiTone, string> = {
+  default: 'var(--v2-text)',
+  token: 'var(--v2-token)',
+  cost: 'var(--v2-cost)',
+  accent: 'var(--v2-accent)',
+}
+interface KpiItem {
+  label: string
+  value: string
+  sub?: string
+  tone?: KpiTone
+}
+
+function KpiStrip({ items, loading }: { items: KpiItem[]; loading: boolean }) {
+  const cell = (i: number): React.CSSProperties => ({
+    flex: '1 1 0',
+    minWidth: 124,
+    padding: '11px 18px',
+    borderLeft: i ? '1px solid var(--v2-border)' : undefined,
+  })
   return (
-    <div className="grid gap-4" style={{ gridTemplateColumns: 'repeat(auto-fit, minmax(150px, 1fr))' }}>
-      {Array.from({ length: 4 }).map((_, i) => (
-        <div key={i} className="flex flex-col gap-2">
-          <SkeletonRow height={12} width="50%" />
-          <SkeletonRow height={28} width="70%" />
-          <SkeletonRow height={12} width="40%" />
-        </div>
-      ))}
+    <div
+      className="flex flex-wrap items-stretch"
+      style={{
+        background: 'var(--v2-surface)',
+        border: '1px solid var(--v2-border)',
+        borderRadius: 'var(--v2-radius)',
+        overflow: 'hidden',
+      }}
+    >
+      {loading || !items.length
+        ? Array.from({ length: 7 }).map((_, i) => (
+            <div key={i} className="flex flex-col justify-center gap-1.5" style={cell(i)}>
+              <SkeletonRow height={9} width="55%" />
+              <SkeletonRow height={18} width="72%" />
+            </div>
+          ))
+        : items.map((it, i) => (
+            <div key={it.label} className="flex flex-col justify-center" style={cell(i)}>
+              <span
+                className="uppercase"
+                style={{
+                  fontFamily: 'var(--v2-font-sans)',
+                  fontSize: 'var(--v2-text-label)',
+                  fontWeight: 600,
+                  letterSpacing: '0.08em',
+                  lineHeight: 1.2,
+                  color: 'var(--v2-faint)',
+                }}
+              >
+                {it.label}
+              </span>
+              <span
+                style={{
+                  fontFamily: 'var(--v2-font-mono)',
+                  fontSize: 'var(--v2-text-hero)',
+                  fontWeight: 600,
+                  lineHeight: 1.1,
+                  fontVariantNumeric: 'tabular-nums',
+                  color: KPI_TONE[it.tone ?? 'default'],
+                  marginTop: 2,
+                }}
+              >
+                {it.value}
+              </span>
+              {it.sub && (
+                <span
+                  style={{
+                    fontFamily: 'var(--v2-font-mono)',
+                    fontSize: 'var(--v2-text-micro)',
+                    fontVariantNumeric: 'tabular-nums',
+                    color: 'var(--v2-muted)',
+                    marginTop: 2,
+                  }}
+                >
+                  {it.sub}
+                </span>
+              )}
+            </div>
+          ))}
     </div>
   )
 }

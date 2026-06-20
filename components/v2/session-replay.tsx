@@ -18,7 +18,7 @@ import Link from 'next/link'
 import { useRouter } from 'next/navigation'
 import ReactMarkdown from 'react-markdown'
 import remarkGfm from 'remark-gfm'
-import { ArrowLeft, ChevronRight, Wrench, AlertTriangle, Layers, User } from 'lucide-react'
+import { ArrowLeft, ChevronRight, Wrench, AlertTriangle, Layers, User, Copy, Check } from 'lucide-react'
 import type { ReplayData, ReplayTurn } from '@/types/claude'
 import { projectColor } from '@/lib/project-color'
 import { Pill } from '@/components/v2/ui'
@@ -42,9 +42,13 @@ function fmtTokens(n: number): string {
 function shortModel(m: string | undefined): string | null {
   if (!m) return null
   const l = m.toLowerCase()
-  const fam = ['opus', 'sonnet', 'haiku'].find((f) => l.includes(f))
-  const ver = l.match(/(\d+[-.]\d+)/)
-  return fam ? (ver ? `${fam}-${ver[1].replace('.', '-')}` : fam) : m.replace(/^claude-?/, '')
+  const fam = ['opus', 'sonnet', 'haiku', 'fable'].find((f) => l.includes(f))
+  if (!fam) return m.replace(/^claude-?/, '')
+  // Minor capped at 2 digits so a date suffix isn't taken as the minor version.
+  const ver = l.match(/(\d+[-.]\d{1,2})(?!\d)/)
+  if (ver) return `${fam}-${ver[1].replace('.', '-')}`
+  const solo = l.match(/-(\d+)(?:-|$)/)
+  return solo ? `${fam}-${solo[1]}` : fam
 }
 function clockOf(iso: string): string {
   const t = new Date(iso)
@@ -85,6 +89,29 @@ export function SessionReplay({ data, projectName }: SessionReplayProps) {
   )
 
   const scrollRef = useRef<HTMLDivElement>(null)
+
+  // Click-to-copy the FULL session id (what `--resume` / warm-ask key on).
+  const [copiedId, setCopiedId] = useState(false)
+  const copyTimer = useRef<ReturnType<typeof setTimeout> | undefined>(undefined)
+  useEffect(() => () => clearTimeout(copyTimer.current), [])
+  async function copyId() {
+    const id = data.session_id
+    try {
+      await navigator.clipboard.writeText(id)
+    } catch {
+      const ta = document.createElement('textarea')
+      ta.value = id
+      ta.style.position = 'fixed'
+      ta.style.opacity = '0'
+      document.body.appendChild(ta)
+      ta.select()
+      try { document.execCommand('copy') } catch { /* give up silently */ }
+      document.body.removeChild(ta)
+    }
+    setCopiedId(true)
+    clearTimeout(copyTimer.current)
+    copyTimer.current = setTimeout(() => setCopiedId(false), 1400)
+  }
 
   // Esc climbs back to the list (altitude nav).
   useEffect(() => {
@@ -138,13 +165,24 @@ export function SessionReplay({ data, projectName }: SessionReplayProps) {
             >
               {projectName}
             </span>
-            <span
-              className="v2-mono shrink-0"
-              style={{ fontSize: 'var(--v2-text-label)', color: 'var(--v2-faint)' }}
-              title={data.session_id}
+            <button
+              type="button"
+              onClick={copyId}
+              aria-label="Copy full session id"
+              title={copiedId ? 'Copied!' : `${data.session_id} — click to copy`}
+              className="v2-mono shrink-0 inline-flex items-center gap-1 transition-colors"
+              style={{
+                fontSize: 'var(--v2-text-label)',
+                color: copiedId ? 'var(--v2-live)' : 'var(--v2-faint)',
+                background: 'transparent',
+                border: 'none',
+                cursor: 'pointer',
+                padding: 0,
+              }}
             >
               {data.session_id.slice(0, 8)}
-            </span>
+              {copiedId ? <Check size={12} /> : <Copy size={12} />}
+            </button>
           </div>
         </div>
         <div className="flex shrink-0 items-center gap-[var(--v2-s3)]">

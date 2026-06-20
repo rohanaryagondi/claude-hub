@@ -52,6 +52,11 @@ export function InlineRecall({ inputRef }: { inputRef?: React.Ref<HTMLInputEleme
   const results = data?.results ?? []
   const building = data?.status != null && data.status !== 'ready'
 
+  // Keyboard selection over the inline results (−1 = nothing selected → Enter asks
+  // Claude). Reset whenever the query changes so the highlight never goes stale.
+  const [cursor, setCursor] = React.useState(-1)
+  React.useEffect(() => { setCursor(-1) }, [debounced])
+
   const submit = () => {
     if (q.trim()) router.push(`/ask?q=${encodeURIComponent(q.trim())}`)
   }
@@ -65,9 +70,21 @@ export function InlineRecall({ inputRef }: { inputRef?: React.Ref<HTMLInputEleme
         placeholder="search every session — Enter to ask Claude"
         readout={data?.doc_count ? `${data.took_ms ?? 0}ms · ${data.doc_count} docs` : undefined}
         onKeyDown={(e) => {
-          if (e.key === 'Enter') {
+          if (e.key === 'ArrowDown') {
             e.preventDefault()
-            submit()
+            setCursor((c) => Math.min(results.length - 1, c + 1))
+          } else if (e.key === 'ArrowUp') {
+            e.preventDefault()
+            setCursor((c) => Math.max(-1, c - 1))
+          } else if (e.key === 'Enter') {
+            e.preventDefault()
+            // Open the highlighted hit if one is selected; else hand off to Claude.
+            if (cursor >= 0 && results[cursor]) router.push(results[cursor].url)
+            else submit()
+          } else if (e.key === 'Escape') {
+            e.preventDefault()
+            setQ('')
+            ;(e.currentTarget as HTMLInputElement).blur()
           }
         }}
       />
@@ -76,13 +93,21 @@ export function InlineRecall({ inputRef }: { inputRef?: React.Ref<HTMLInputEleme
           {building ? (
             <SkeletonRow height={40} />
           ) : results.length ? (
-            results.map((r) => (
+            results.map((r, i) => {
+              const on = i === cursor
+              return (
               <button
                 key={r.session_id}
                 type="button"
+                aria-current={on || undefined}
                 onClick={() => router.push(r.url)}
                 className="flex flex-col gap-0.5 text-left v2-row-hover"
-                style={{ padding: 'var(--v2-s2) var(--v2-s3)', borderTop: '1px solid var(--v2-border)' }}
+                style={{
+                  padding: 'var(--v2-s2) var(--v2-s3)',
+                  borderTop: '1px solid var(--v2-border)',
+                  borderLeft: `2px solid ${on ? 'var(--v2-accent)' : 'transparent'}`,
+                  background: on ? 'var(--v2-surface-2)' : undefined,
+                }}
               >
                 <span className="truncate" style={{ fontSize: 'var(--v2-text-body)', fontWeight: 600, color: 'var(--v2-text)' }}>
                   {r.title}{' '}
@@ -90,7 +115,7 @@ export function InlineRecall({ inputRef }: { inputRef?: React.Ref<HTMLInputEleme
                 </span>
                 <MatchSnippet text={r.snippet} lines={1} />
               </button>
-            ))
+            )})
           ) : (
             <span
               className="v2-mono"

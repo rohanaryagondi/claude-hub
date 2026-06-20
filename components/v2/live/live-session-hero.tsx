@@ -43,7 +43,7 @@ export function LiveSessionHero({ session, now, tickTokens, variant, onOpen, onS
   const name = folderName(session.project_path)
   const tail = pathTail(session.project_path, 1)
   const hue = projectColor(name)
-  const title = sessionTitle({ first_prompt: session.first_prompt, session_id: session.session_id })
+  const title = sessionTitle({ custom_title: session.custom_title, first_prompt: session.first_prompt, session_id: session.session_id })
 
   const delta = ageMs(session.file_mtime_ms, now)
   const isLive = delta <= LIVE_WINDOW_MS
@@ -55,7 +55,9 @@ export function LiveSessionHero({ session, now, tickTokens, variant, onOpen, onS
   const totalTok = tickTokens != null ? tickTokens : session.input_tokens + session.output_tokens
   const ratePerMin = recentTokenRate(session.recent_turns, now)
 
-  const depth = variant === 'solo' ? 12 : 6
+  // The catch-up summary is the most valuable read, and was getting clipped — so
+  // give it the room and trim the transcript depth to compensate.
+  const depth = variant === 'solo' ? 8 : 4
 
   return (
     <section
@@ -131,7 +133,7 @@ export function LiveSessionHero({ session, now, tickTokens, variant, onOpen, onS
             lineHeight: 1.5, margin: 0,
             color: aiSummary ? 'var(--v2-text)' : 'var(--v2-muted)',
             display: '-webkit-box',
-            WebkitLineClamp: variant === 'solo' ? 4 : 3,
+            WebkitLineClamp: variant === 'solo' ? 8 : 5,
             WebkitBoxOrient: 'vertical', overflow: 'hidden',
           }}
           title={heroNarrative}
@@ -157,13 +159,13 @@ export function LiveSessionHero({ session, now, tickTokens, variant, onOpen, onS
         className="relative flex items-center gap-[var(--v2-s3)] v2-mono shrink-0"
         style={{ padding: 'var(--v2-s2) var(--v2-s4)', borderTop: '1px solid var(--v2-border)', fontSize: 'var(--v2-text-micro)' }}
       >
-        <span className="inline-flex items-center gap-1" style={{ color: 'var(--v2-token)' }} title="total tokens this session">
+        <span className="inline-flex items-center gap-1" style={{ color: 'var(--v2-token)' }} title={`${totalTok.toLocaleString()} tokens (input + output)`}>
           <Cpu size={11} />{fmtTokens(totalTok)}
         </span>
         {isLive && ratePerMin > 0 && (
           <span style={{ color: 'var(--v2-token)', opacity: 0.7 }} title="token rate">{fmtTokens(Math.round(ratePerMin))}/m</span>
         )}
-        <span style={{ color: 'var(--v2-cost)' }} title="estimated cost">{fmtCost(session.estimated_cost)}</span>
+        <span style={{ color: 'var(--v2-cost)' }} title={`$${session.estimated_cost.toFixed(4)} estimated`}>{fmtCost(session.estimated_cost)}</span>
         <span style={{ color: 'var(--v2-faint)' }} title="messages">{session.assistant_message_count} turns</span>
         <span className="ml-auto" style={{ color: 'var(--v2-faint)' }} title="active elapsed">{fmtDuration(session.duration_minutes)}</span>
       </div>
